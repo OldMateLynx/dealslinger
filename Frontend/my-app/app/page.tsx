@@ -1,65 +1,201 @@
-import Image from "next/image";
+'use client'; // needed for useState and interactivity in the App Router
 
-export default function Home() {
+import { useState } from 'react';
+
+// Defines the shape of a search result so TypeScript knows what "data" looks like
+interface SearchResult {
+  companyName: string;
+  location: string;
+  description: string;
+  competitors: string[];
+}
+
+export default function SearchPage() {
+  // Tracks what the user types into the search box
+  const [query, setQuery] = useState<string>('');
+
+  // Holds the data to display after a search; null means "no search yet"
+  const [data, setData] = useState<SearchResult | null>(null);
+
+  // Updates query state as the user types
+  function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
+    setQuery(e.target.value);
+  }
+
+  // Runs the search logic and populates the results below the search bar
+  function performSearch() {
+    if (!query.trim()) return;
+
+    // Placeholder result — replace this with a real API call later
+    const mockResult: SearchResult = {
+      companyName: query,
+      location: 'Sydney, NSW, Australia',
+      description:
+        'A brief summary of what this company does, its market position, and key offerings will appear here once connected to a real data source.',
+      competitors: [
+        'Competitor One Pty Ltd',
+        'Competitor Two Group',
+        'Competitor Three Holdings',
+        'Competitor Four & Co',
+        'Competitor Five Enterprises',
+      ],
+    };
+
+    setData(mockResult);
+  }
+
+  // Handles form submission (covers both Enter key and button click)
+  function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault(); // stop the page from reloading
+    performSearch();
+  }
+
+  // Renders a single competitor list item
+  function renderCompetitor(name: string, index: number) {
+    return <li key={index}>{name}</li>;
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
+    <div className="page">
+      <div className="content">
+        {/* Search bar — stays at the top, always visible */}
+        <form onSubmit={handleSubmit} className="search-form">
+          <input
+            type="text"
+            value={query}
+            onChange={handleInputChange}
+            placeholder="Search a company..."
+            className="search-input"
+          />
+          <button type="submit" className="search-button">
+            Search
+          </button>
+        </form>
+
+        {/* Results render directly below the search bar once a search has run */}
+        {data && (
+          <div className="results">
+            <h1 className="company-name">{data.companyName}</h1>
+            <p className="location">{data.location}</p>
+
+            <p className="description">{data.description}</p>
+
+            <h2 className="section-label">Local Competitors</h2>
+            <ul className="competitor-list">
+              {data.competitors.map(renderCompetitor)}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <style jsx>{`
+        /* Page wrapper — transparent, full height, centers content horizontally */
+        .page {
+          background: transparent;
+          min-height: 100vh;
+          width: 100%;
+          color: #e5e5e5;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          display: flex;
+          justify-content: center;
+        }
+
+        /* Single centered column holding search bar + results */
+        .content {
+          width: 100%;
+          max-width: 560px;
+          padding: 80px 24px 60px;
+        }
+
+        .search-form {
+          display: flex;
+          align-items: center;
+          width: 100%;
+          background: rgba(255, 255, 255, 0.06);
+          border: 1px solid rgba(255, 255, 255, 0.15);
+          border-radius: 16px;
+          overflow: hidden;
+          backdrop-filter: blur(6px);
+        }
+
+        .search-input {
+          flex: 1;
+          background: transparent;
+          border: none;
+          outline: none;
+          padding: 16px 20px;
+          font-size: 16px;
+          color: #f0f0f0;
+        }
+
+        .search-input::placeholder {
+          color: rgba(255, 255, 255, 0.4);
+        }
+
+        .search-button {
+          background: rgba(255, 255, 255, 0.1);
+          border: none;
+          border-left: 1px solid rgba(255, 255, 255, 0.15);
+          color: #f0f0f0;
+          padding: 16px 22px;
+          font-size: 15px;
+          cursor: pointer;
+          transition: background 0.15s ease;
+        }
+
+        .search-button:hover {
+          background: rgba(255, 255, 255, 0.18);
+        }
+
+        /* Results block — spaced below the search bar */
+        .results {
+          margin-top: 40px;
+        }
+
+        .company-name {
+          font-size: 28px;
+          font-weight: 600;
+          margin-bottom: 4px;
+          color: #ffffff;
+        }
+
+        .location {
+          font-size: 15px;
+          color: rgba(255, 255, 255, 0.5);
+          margin-bottom: 20px;
+        }
+
+        /* Contrasting description text — lighter background block against the monotone page */
+        .description {
+          background: rgba(255, 255, 255, 0.9);
+          color: #111111;
+          padding: 16px 18px;
+          border-radius: 12px;
+          font-size: 15px;
+          line-height: 1.5;
+          margin-bottom: 28px;
+        }
+
+        .section-label {
+          font-size: 13px;
+          text-transform: uppercase;
+          letter-spacing: 0.08em;
+          color: rgba(255, 255, 255, 0.4);
+          margin-bottom: 12px;
+        }
+
+        .competitor-list {
+          list-style: none;
+          padding: 0;
+          margin: 0;
+        }
+
+        .competitor-list li {
+          padding: 14px 16px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          font-size: 15px;
+        }
+      `}</style>
     </div>
   );
 }
