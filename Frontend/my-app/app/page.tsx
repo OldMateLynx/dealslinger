@@ -89,12 +89,12 @@ export default function SearchPage() {
       </div>
 
       <style jsx>{`
-        /* Page wrapper — transparent, full height, centers content horizontally */
+        /* Page wrapper — light background, full height, centers content horizontally */
         .page {
-          background: transparent;
+          background: #fafafa;
           min-height: 100vh;
           width: 100%;
-          color: #e5e5e5;
+          color: #1a1a1a;
           font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
           display: flex;
           justify-content: center;
@@ -111,11 +111,11 @@ export default function SearchPage() {
           display: flex;
           align-items: center;
           width: 100%;
-          background: rgba(255, 255, 255, 0.06);
-          border: 1px solid rgba(255, 255, 255, 0.15);
+          background: #ffffff;
+          border: 1px solid rgba(0, 0, 0, 0.12);
           border-radius: 16px;
           overflow: hidden;
-          backdrop-filter: blur(6px);
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.06);
         }
 
         .search-input {
@@ -125,18 +125,17 @@ export default function SearchPage() {
           outline: none;
           padding: 16px 20px;
           font-size: 16px;
-          color: #f0f0f0;
+          color: #111111;
         }
 
         .search-input::placeholder {
-          color: rgba(255, 255, 255, 0.4);
+          color: rgba(0, 0, 0, 0.35);
         }
 
         .search-button {
-          background: rgba(255, 255, 255, 0.1);
+          background: #111111;
           border: none;
-          border-left: 1px solid rgba(255, 255, 255, 0.15);
-          color: #f0f0f0;
+          color: #ffffff;
           padding: 16px 22px;
           font-size: 15px;
           cursor: pointer;
@@ -144,7 +143,7 @@ export default function SearchPage() {
         }
 
         .search-button:hover {
-          background: rgba(255, 255, 255, 0.18);
+          background: #333333;
         }
 
         /* Results block — spaced below the search bar */
@@ -156,18 +155,18 @@ export default function SearchPage() {
           font-size: 28px;
           font-weight: 600;
           margin-bottom: 4px;
-          color: #ffffff;
+          color: #111111;
         }
 
         .location {
           font-size: 15px;
-          color: rgba(255, 255, 255, 0.5);
+          color: rgba(0, 0, 0, 0.5);
           margin-bottom: 20px;
         }
 
-        /* Contrasting description text — lighter background block against the monotone page */
+        /* Description block — subtle contrast against the light page */
         .description {
-          background: rgba(255, 255, 255, 0.9);
+          background: #f0f0f0;
           color: #111111;
           padding: 16px 18px;
           border-radius: 12px;
@@ -180,7 +179,7 @@ export default function SearchPage() {
           font-size: 13px;
           text-transform: uppercase;
           letter-spacing: 0.08em;
-          color: rgba(255, 255, 255, 0.4);
+          color: rgba(0, 0, 0, 0.45);
           margin-bottom: 12px;
         }
 
@@ -192,8 +191,9 @@ export default function SearchPage() {
 
         .competitor-list li {
           padding: 14px 16px;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+          border-bottom: 1px solid rgba(0, 0, 0, 0.08);
           font-size: 15px;
+          color: #1a1a1a;
         }
       `}</style>
     </div>
