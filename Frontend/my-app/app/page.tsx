@@ -2,12 +2,21 @@
 
 import { useState } from 'react';
 
-// Defines the shape of a search result so TypeScript knows what "data" looks like
-interface SearchResult {
-  companyName: string;
-  location: string;
-  description: string;
-  competitors: string[];
+// CHANGED: This shape now matches exactly what your FastAPI /api/scan endpoint
+// returns (see Backend/main.py). It replaces the old mock "companyName/description/
+// competitors" shape, since we're no longer inventing fake data.
+interface ScanResult {
+  anchor: {
+    name: string;
+    address: string | null;
+  };
+  opportunities: {
+    skateparks: string[];
+    footy_fields: string[];
+  };
+  competitors: {
+    skate_shops: string[];
+  };
 }
 
 export default function SearchPage() {
@@ -15,33 +24,56 @@ export default function SearchPage() {
   const [query, setQuery] = useState<string>('');
 
   // Holds the data to display after a search; null means "no search yet"
-  const [data, setData] = useState<SearchResult | null>(null);
+  const [data, setData] = useState<ScanResult | null>(null);
+
+  // NEW: Tracks whether a search is currently in flight, so we can show a
+  // loading state instead of the page looking frozen while we wait on the
+  // backend (which itself is waiting on 3 Google API calls).
+  const [isLoading, setIsLoading] = useState(false);
+
+  // NEW: Tracks any error message (e.g. business not found, backend down)
+  // so we can show something useful instead of failing silently.
+  const [error, setError] = useState<string | null>(null);
 
   // Updates query state as the user types
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
     setQuery(e.target.value);
   }
 
-  // Runs the search logic and populates the results below the search bar
-  function performSearch() {
+  // CHANGED: performSearch is now async and calls your real FastAPI backend
+  // instead of building a fake mockResult.
+  async function performSearch() {
     if (!query.trim()) return;
 
-    // Placeholder result — replace this with a real API call later
-    const mockResult: SearchResult = {
-      companyName: query,
-      location: 'Sydney, NSW, Australia',
-      description:
-        'A brief summary of what this company does, its market position, and key offerings will appear here once connected to a real data source.',
-      competitors: [
-        'Competitor One Pty Ltd',
-        'Competitor Two Group',
-        'Competitor Three Holdings',
-        'Competitor Four & Co',
-        'Competitor Five Enterprises',
-      ],
-    };
+    setIsLoading(true);
+    setError(null);
+    setData(null); // clear old results while the new search runs
 
-    setData(mockResult);
+    try {
+      // NEXT_PUBLIC_API_URL should be set in Frontend/.env.local, e.g.:
+      // NEXT_PUBLIC_API_URL=http://localhost:8000
+      // It's safe to expose (NEXT_PUBLIC_) because it's just a URL, not a secret —
+      // your actual Google API key stays server-side in the Backend .env file.
+      const res = await fetch(
+        `${process.env.NEXT_PUBLIC_API_URL}/api/scan?business_name=${encodeURIComponent(query)}`
+      );
+
+      // FastAPI returns a non-200 status (e.g. 404 if the business name
+      // wasn't found) with a JSON body containing a "detail" message.
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || `Request failed with status ${res.status}`);
+      }
+
+      const result: ScanResult = await res.json();
+      setData(result);
+    } catch (err) {
+      // Covers both network failures (backend not running) and the
+      // thrown Error above (business not found, etc.)
+      setError(err instanceof Error ? err.message : 'Something went wrong');
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   // Handles form submission (covers both Enter key and button click)
@@ -50,8 +82,10 @@ export default function SearchPage() {
     performSearch();
   }
 
-  // Renders a single competitor list item
-  function renderCompetitor(name: string, index: number) {
+  // CHANGED: renamed from renderCompetitor to renderListItem since we now
+  // reuse this for opportunities too (skateparks, footy fields) as well as
+  // competitors (skate shops) — same list-item shape, different data.
+  function renderListItem(name: string, index: number) {
     return <li key={index}>{name}</li>;
   }
 
@@ -67,23 +101,53 @@ export default function SearchPage() {
             placeholder="Search a company..."
             className="search-input"
           />
-          <button type="submit" className="search-button">
-            Search
+          {/* NEW: button disables while loading and label changes, so the
+              user gets feedback that something is happening (Google calls
+              can take a second or two since we're chaining 3 requests). */}
+          <button type="submit" className="search-button" disabled={isLoading}>
+            {isLoading ? 'Searching...' : 'Search'}
           </button>
         </form>
+
+        {/* NEW: error state — shown if the backend call fails or the
+            business name can't be found by Google Places. */}
+        {error && <p className="error-message">{error}</p>}
 
         {/* Results render directly below the search bar once a search has run */}
         {data && (
           <div className="results">
-            <h1 className="company-name">{data.companyName}</h1>
-            <p className="location">{data.location}</p>
+            <h1 className="company-name">{data.anchor.name}</h1>
+            <p className="location">{data.anchor.address ?? 'Address unavailable'}</p>
 
-            <p className="description">{data.description}</p>
+            {/* NEW: Opportunities section — nearby skateparks and footy fields.
+                This replaces the old static "description" paragraph, since that
+                was just mock filler text. */}
+            <h2 className="section-label">Opportunities — Skateparks</h2>
+            {data.opportunities.skateparks.length > 0 ? (
+              <ul className="item-list">
+                {data.opportunities.skateparks.map(renderListItem)}
+              </ul>
+            ) : (
+              <p className="empty-note">None found nearby.</p>
+            )}
 
-            <h2 className="section-label">Local Competitors</h2>
-            <ul className="competitor-list">
-              {data.competitors.map(renderCompetitor)}
-            </ul>
+            <h2 className="section-label">Opportunities — Footy Fields</h2>
+            {data.opportunities.footy_fields.length > 0 ? (
+              <ul className="item-list">
+                {data.opportunities.footy_fields.map(renderListItem)}
+              </ul>
+            ) : (
+              <p className="empty-note">None found nearby.</p>
+            )}
+
+            <h2 className="section-label">Competitors — Skate Shops</h2>
+            {data.competitors.skate_shops.length > 0 ? (
+              <ul className="item-list">
+                {data.competitors.skate_shops.map(renderListItem)}
+              </ul>
+            ) : (
+              <p className="empty-note">None found nearby.</p>
+            )}
           </div>
         )}
       </div>
@@ -146,6 +210,22 @@ export default function SearchPage() {
           background: #333333;
         }
 
+        /* NEW: dimmed look while a search is in flight */
+        .search-button:disabled {
+          background: #666666;
+          cursor: not-allowed;
+        }
+
+        /* NEW: error message styling */
+        .error-message {
+          margin-top: 16px;
+          padding: 12px 16px;
+          background: #fde8e8;
+          color: #9b1c1c;
+          border-radius: 8px;
+          font-size: 14px;
+        }
+
         /* Results block — spaced below the search bar */
         .results {
           margin-top: 40px;
@@ -161,17 +241,6 @@ export default function SearchPage() {
         .location {
           font-size: 15px;
           color: rgba(0, 0, 0, 0.5);
-          margin-bottom: 20px;
-        }
-
-        /* Description block — subtle contrast against the light page */
-        .description {
-          background: #f0f0f0;
-          color: #111111;
-          padding: 16px 18px;
-          border-radius: 12px;
-          font-size: 15px;
-          line-height: 1.5;
           margin-bottom: 28px;
         }
 
@@ -181,19 +250,30 @@ export default function SearchPage() {
           letter-spacing: 0.08em;
           color: rgba(0, 0, 0, 0.45);
           margin-bottom: 12px;
+          margin-top: 24px;
         }
 
-        .competitor-list {
+        /* RENAMED from .competitor-list — now shared by opportunities and
+           competitors since they're the same visual list style. */
+        .item-list {
           list-style: none;
           padding: 0;
           margin: 0;
         }
 
-        .competitor-list li {
+        .item-list li {
           padding: 14px 16px;
           border-bottom: 1px solid rgba(0, 0, 0, 0.08);
           font-size: 15px;
           color: #1a1a1a;
+        }
+
+        /* NEW: shown when a category has zero results nearby */
+        .empty-note {
+          font-size: 14px;
+          color: rgba(0, 0, 0, 0.4);
+          font-style: italic;
+          margin: 0 0 8px 0;
         }
       `}</style>
     </div>
