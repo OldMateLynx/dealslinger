@@ -34,10 +34,6 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 COMPETITOR_RADIUS_METERS = 10000
 OPPORTUNITY_RADIUS_METERS = 10000
 
-# NEW: shared field mask used everywhere. Added "places.id" — this is what
-# lets us detect and exclude the searched business from its own results
-# (Fix #1), since comparing unique IDs is far more reliable than comparing
-# display names (two different businesses could share a name; IDs can't).
 PLACE_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location"
 
 
@@ -54,6 +50,8 @@ class SearchPlanEntry(BaseModel):
 
 
 class SearchPlan(BaseModel):
+    business_classification: Literal["specialist", "generalist"]
+    relevant_products: list[str]
     entries: list[SearchPlanEntry]
 
 
@@ -67,7 +65,6 @@ async def geocode_business(client: httpx.AsyncClient, name: str) -> dict:
         f"{BASE_URL}:searchText",
         headers={
             "X-Goog-Api-Key": API_KEY,
-            # NEW: places.id + places.types both included now
             "X-Goog-FieldMask": PLACE_FIELD_MASK + ",places.types",
         },
         json={"textQuery": name},
@@ -86,11 +83,6 @@ class UnsupportedTypeError(Exception):
     pass
 
 
-# NEW: haversine formula — calculates great-circle distance between two
-# lat/lng points in kilometers. Standard approach for "as the crow flies"
-# distance; doesn't account for actual road routes, but is more than
-# accurate enough for sorting nearby results and doesn't cost an extra API
-# call (we already have both points' coordinates from the Places responses).
 def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371  # Earth's radius in km
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -148,47 +140,73 @@ async def text_search_nearby(client: httpx.AsyncClient, query: str, lat: float, 
 # Claude call — generates the dynamic search plan
 # ---------------------------------------------------------------------------
 
-_plan_cache: dict[tuple, SearchPlan] = {}
-
 
 def build_search_plan_prompt(business_name: str, google_types: list[str], product_list: list[str]) -> str:
-    return f"""You are helping a B2B sales rep find local sales opportunities and competitors
-for a retail business called "{business_name}", which Google classifies as:
+    return f"""You are a B2B sales rep trying to find local sales opportunities and competitors
+for a business called "{business_name}", which Google classifies as:
 {google_types}.
-This business specifically sells the following product categories:
+This business you represent specifically sells the set of following product categories:
 {product_list}
-Generate a search plan: a list of entries, where each entry is either an
-"opportunity" (a nearby place type that represents a potential customer base
-or sales lead, e.g. sports fields for a sports store) or a "competitor" (a
-nearby business that sells similar products).
-Base every entry strictly on the product categories listed above — do not
-include categories just because they're common for a generic sporting goods
-store. For example, if "Skateboards" and "Scooters" are in the product
-list, skateparks are a relevant opportunity and skate shops are a relevant
-competitor. But if nothing in the product list relates to golf, do NOT
-include golf courses, golf equipment stores, or any other golf-related
-category, even though a typical sporting goods store might stock golf gear.
-Every entry must trace back to a specific product category in the list.
 
-STRICT RELEVANCE TO THIS SPECIFIC BUSINESS (not just the product category
-in general): a product category can generically imply a broad opportunity
-type, but you must only include it if it is ALSO specifically relevant to
-what THIS business actually is, based on its name and Google classification
-— not just its product list in isolation. For example, "Mouthguards" as a
-product might generically suggest "sports clubs" as an opportunity for a
-general sporting goods store. But if the business being searched is
-specifically an indoor skatepark (e.g. its name and classification identify
-it as a dedicated skate venue, not a general sports retailer), then generic
-fitness centers, gyms, or unrelated sports clubs (netball, cricket, etc.)
-are NOT valid opportunities, even though "Mouthguards" is in the product
-list — because those venues have no specific connection to what this
-particular business does. Only include an opportunity or competitor if it
-is directly and specifically tied to the actual nature of THIS business,
-not merely generically tied to one of its stocked product categories.
-When a business is a specialist in one narrow area (e.g. a dedicated
-skatepark, a dedicated football store), keep opportunities tightly centered
-on that specialty, even if the product list alone could theoretically
-justify a broader set of categories.
+You must fill out THREE things in this exact order: business_classification,
+relevant_products, and entries. Do not skip straight to entries — the first
+two fields are mandatory checkpoints that entries must be built on top of.
+
+STEP 1 — business_classification:
+Decide whether "{business_name}" is a "specialist" (a narrow, niche business
+that only stocks products related to one specific activity/category) or a
+"generalist" (a broad business that stocks a wide variety of unrelated
+product categories). Base this on the business name and its Google
+classification: {google_types}.
+Tip: An easy way to tell is if it has a specific product or niche in its
+title. "Jim's Electrical" is likely a specialist electrical store. "Westend
+Skate Shop" is likely a specialist skate shop. "Intersport Nowra" is likely
+a generalist sport shop. "Sportspower Newcastle City" is likely a
+generalist sport shop.
+
+STEP 2 — relevant_products:
+From the full product list {product_list}, output ONLY the subset that this
+SPECIFIC business ("{business_name}") would actually stock, given your
+business_classification from Step 1. You must actively exclude any product
+from the input list that does not fit this specific business, even if that
+product is a plausible item for the general category. This is the single
+most important filtering step — every entry you generate afterwards must
+trace back to something in this filtered relevant_products list, never to
+the full original list if something was excluded.
+Example: if the full product list is (mouthguards, skateboards, helmets)
+and the business is "Westend Skate Shop" (a specialist skate shop), then
+relevant_products = (skateboards, helmets). Mouthguards must be EXCLUDED
+here because a dedicated skate shop does not sell mouthguards, even though
+mouthguards is a real product in the input list.
+If business_classification is "generalist", relevant_products will usually
+be closer to the full input list, since generalist stores plausibly stock
+a wider spread of categories.
+
+STEP 3 — entries:
+Generate a list of entries, where each entry is either an "opportunity" (a
+nearby place type that represents a potential customer base or sales lead,
+e.g. sports fields for a sports store, skateparks for a skate shop) or a
+"competitor" (a nearby business that sells similar products). Every single
+entry's source_product MUST be one of the items in relevant_products from
+Step 2 — never use a product that Step 2 excluded, even if it seems
+tempting given the entry type.
+
+An example high level search flow in perspective of YOU the B2B sales rep is
+(this is just an example, apply the same principles to all categories of
+businesses and products):
+1. The set of product categories the business that I represent wholesales is productSet = (mouthguards, skateboards, helmets).
+2. We are trying to find opportunities and competitors for a business called "Westend Skate Shop".
+3. business_classification = "specialist". relevant_products = (skateboards, helmets) — mouthguards is excluded because a dedicated skate shop wouldn't sell it.
+4. We then generate the "opportunities" strictly related to both the business "Westend Skate Shop" and relevant_products. An example of a valid opportunity is "skateparks" as skate shops would sell skateboards to people who visit skateparks. An example of an invalid opportunity would be "golf courses" as nothing in relevant_products would supply to golf courses AND "Westend Skate Shop" is a skate shop which would not sell to golf courses. Opportunities are specifically nearby places that represent a relevant customer base or sales opportunities for this specific business we are targeting to sell the products we stock.
+5. We then generate the "competitors" which are businesses likely to stock similar products related to the business "Westend Skate Shop" and relevant_products. The most obvious valid competitors for "Westend Skate Shop" are other Skate Shops since they are the same business. Examples of other valid competitors are "Bike Shops" as they likely stock helmets, or a more general "Sports Store" as general sport stores like rebel sport or sportspower tend to also stock skateboards and helmets. Competitors are any nearby places that sell similar products to our target business that we also stock, e.g. if we are stocking "scooters" or "helmets" as a product, and we are targeting a "skate shop" a bike shop is a competitor as bike shop's sell both of those items.
+
+During generation, you must understand certain nuances:
+- Be specific in your Entry generations. Give clear, direct Searches like "Sports Clubs" or "Skate Shops" or "Sports Store".
+- Make sure searches are clearly seperated, e.g. do not search seperately for "skatepark" and "scooterpark" and "indoor skatepark" as they are practically the same places in real life, search only for the most relevant being "skatepark". However, "Skatepark" and "BMX Track" are completely different places and should be different Entries in the example event you are searching for opportunities for a "Bike Shop" that sells Helmets.
+- Searching "opportunities" and "competitors" that are actually real. E.g. If you're wholesaling a product "Scooters", dedicated "Scooter Shops" don't really exist. "Skate Shops" and "Bike shops" and "Sports Stores" sell scooters. Similarly "skateboard clubs" aren't a real thing practically in real life that people visit so just "Skateparks" is fine.
+- Don't search places that are practically the exact same, e.g. "sporting goods stores" and "sports stores", these are NOT seperate entries, just use a single Entry "sports store"
+- With generalist businesses (business_classification = "generalist"), each relevant product MUST generate AT LEAST 2-3 separate, concrete opportunity entries representing genuinely distinct real-world venue types — never settle for one vague catch-all category when more specific real venues exist. For example, for "mouthguards" do NOT stop at a single generic "Sports Clubs" entry — instead generate the specific, distinct venue types separately, such as: "Ovals" (the common Australian/local term for footy, rugby, and cricket fields — a strong, concrete mouthguard/protective-gear opportunity in its own right and always worth considering for any contact-sport-adjacent product), "Football Clubs", "Martial Arts Studios", "Basketball Courts", etc. Always think in terms of the SPECIFIC local, real-world venue a customer for that product would actually go to, not an umbrella term that quietly absorbs several different venue types into one entry.
+- With specialist businesses (business_classification = "specialist"), tighten up the Entries and make them more hyper-relevant to the stores' specialty. E.g. For a dedicated Skate Store, choose skate adjacent "opportunity" Entries only, even if that means fewer total entries.
 
 Never include schools, school grounds, or school sporting facilities as an
 opportunity or competitor, under any circumstances — even if a search term
@@ -217,7 +235,23 @@ For EACH entry, decide the best way to search Google Places:
   grounds). Set "value" to the exact search phrase to use.
 When in doubt, or if the category isn't an exact match to the list above,
 always use "text_search" — it is the safer default and never fails due to
-an invalid type string."""
+an invalid type string.
+
+Finally for each entry in "entries", the "value" is the actual entry we are searching for competitors and opportunities.
+
+Regardless on whatever the "value" is, the "label" should be a human readable and straightforward version of it. Sometimes the "label" needs to be different text to the "value", other times it can be the same. For example:
+"value" = "bicycle_store", "label" = "Bike Shop",
+"value" = "skateboard_park", "label" = "Skateparks",
+"value" = "Skate Shops", "label" = "Skate Shops",
+"value" = "Sports Stores", "label" = "Sports Stores",
+
+additionally:
+- place in brackets () in the label at the end next to the Entry name, the items you believe these "competitors" will stock that made you come to the decision to include this Entry as a competitor seperated by an " & " if there's more than 1
+- place in brackets () in the label at the end next to the Entry name, the items you believe these "opportunities" will purchase that made you come to the decision to include this Entry as an "opportunity" seperated by an " & " if there's more than 1
+
+Reminder: every bracketed item in every label must come from relevant_products
+(Step 2), never from an excluded product.
+"""
 
 
 SEARCH_PLAN_TOOL = {
@@ -226,8 +260,19 @@ SEARCH_PLAN_TOOL = {
     "input_schema": {
         "type": "object",
         "properties": {
+            "business_classification": {
+                "type": "string",
+                "enum": ["specialist", "generalist"],
+                "description": "Whether this business specializes in a narrow product niche (e.g. a dedicated skate shop) or sells a broad general variety (e.g. a general sporting goods store). Must be filled out first, before relevant_products and entries."
+            },
+            "relevant_products": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "The filtered subset of the input product list that this SPECIFIC business would actually stock, based on its name and business_classification. Exclude any product from the input list that doesn't fit this business, even if it's a plausible product for the general category. Must be filled out before entries, and every entry's source_product must come from this list."
+            },
             "entries": {
                 "type": "array",
+                "description": "For generalist businesses, generate multiple distinct entries per relevant product where multiple real, separately-searchable venue types exist. Do not consolidate several genuinely different venue types into one generic umbrella entry.",
                 "items": {
                     "type": "object",
                     "properties": {
@@ -235,31 +280,21 @@ SEARCH_PLAN_TOOL = {
                         "category": {"type": "string", "enum": ["opportunity", "competitor"]},
                         "method": {"type": "string", "enum": ["nearby_type", "text_search"]},
                         "value": {"type": "string"},
-                        "source_product": {"type": "string"},
+                        "source_product": {
+                            "type": "string",
+                            "description": "Must be one of the products listed in relevant_products, never an excluded product."
+                        },
                     },
                     "required": ["label", "category", "method", "value", "source_product"],
                 },
             }
         },
-        "required": ["entries"],
+        "required": ["business_classification", "relevant_products", "entries"],
     },
 }
 
 
 def get_search_plan(business_name: str, google_types: list[str], product_list: list[str]) -> SearchPlan:
-    # NOTE: cache key intentionally does NOT include business_name, only
-    # product_list + google_types. Fix #2 (strict relevance to THIS specific
-    # business) actually depends on the business name being fed into the
-    # prompt every time — but since two different businesses rarely share
-    # identical product_list + google_types combos in practice, this cache
-    # still mostly works as intended. If you notice stale/wrong plans being
-    # reused across genuinely different businesses, that's the tradeoff to
-    # revisit (e.g. cache by business_name instead, at the cost of more
-    # Claude calls).
-    cache_key = (tuple(sorted(product_list)), tuple(sorted(google_types)))
-    if cache_key in _plan_cache:
-        return _plan_cache[cache_key]
-
     prompt = build_search_plan_prompt(business_name, google_types, product_list)
 
     message = claude_client.messages.create(
@@ -284,7 +319,18 @@ def get_search_plan(business_name: str, google_types: list[str], product_list: l
         if "school" not in entry.label.lower() and "school" not in entry.value.lower()
     ]
 
-    _plan_cache[cache_key] = plan
+    relevant_lower = {p.strip().lower() for p in plan.relevant_products}
+    plan.entries = [
+        entry for entry in plan.entries
+        if entry.source_product.strip().lower() in relevant_lower
+    ]
+
+    # TEMP DEBUG — remove once you're done inspecting
+    print(f"[classification] {plan.business_classification!r}")
+    print(f"[relevant_products] {plan.relevant_products!r}")
+    for entry in plan.entries:
+        print(f"[{entry.category}] {entry.label!r} -> method={entry.method}, value={entry.value!r}, source_product={entry.source_product!r}")
+
     return plan
 
 
@@ -311,8 +357,6 @@ async def scan_location(
         lat = anchor["location"]["latitude"]
         lng = anchor["location"]["longitude"]
         google_types = anchor.get("types", [])
-        # NEW: capture the searched business's own place ID, used below to
-        # exclude it from appearing in its own results (Fix #1).
         anchor_id = anchor.get("id")
 
         plan = get_search_plan(business_name, google_types, product_list)
@@ -332,12 +376,6 @@ async def scan_location(
             else:
                 raw_places = await text_search_nearby(client, entry.value, lat, lng, radius)
 
-            # NEW: Google's locationBias (used by text_search_nearby) is a
-            # soft ranking preference, NOT a hard radius limit — Google can
-            # and will return good matches well outside it (this is why
-            # competitors set to a 3km radius were showing results 60km
-            # away). We enforce the radius ourselves here as a hard cutoff,
-            # using the distance we already calculate below.
             radius_km = radius / 1000
 
             results_with_distance = []
@@ -350,19 +388,10 @@ async def scan_location(
                 p_lng = p["location"]["longitude"]
                 distance_km = round(haversine_km(lat, lng, p_lat, p_lng), 1)
 
-                # NEW: hard radius enforcement — drop anything Google
-                # returned outside the intended search distance.
                 if distance_km > radius_km:
                     continue
 
                 name = p["displayName"]["text"]
-
-                # NEW: dedupe by name — chains with multiple physical
-                # branches (e.g. "Fast Times Skateboarding" at 5 different
-                # addresses) were showing up once per branch. Since results
-                # are processed in distance order below via sort, we sort
-                # first, then dedupe, keeping only the nearest branch of
-                # each named business.
                 results_with_distance.append({"name": name, "distance_km": distance_km})
 
             results_with_distance.sort(key=lambda r: r["distance_km"])

@@ -2,9 +2,6 @@
 
 import { useState } from 'react';
 
-// CHANGED: each item is now an object with a name and its distance from
-// the searched business, instead of a plain string. Matches main.py's new
-// response shape.
 interface PlaceResult {
   name: string;
   distance_km: number;
@@ -25,34 +22,36 @@ const PRODUCT_CATEGORIES = [
   'Skateboards',
   'Scooters',
   'Knee & Elbow Pads',
-  'Helmets',
+  'Skate/Scooter/Bike Helmets',
 ];
 
-// NEW: the black pill styling is now defined as a plain JS object and
-// applied via the inline `style` prop instead of the styled-jsx
-// ".dropdown-heading" class. Why: Tailwind v4's Preflight layer resets
-// <button> elements (background-color: transparent, appearance: none,
-// etc.), and in some Next.js + Tailwind v4 setups that reset can end up
-// winning over styled-jsx's scoped class styles depending on cascade layer
-// order. Inline styles always have the highest priority in CSS — no
-// stylesheet, layer, or cache issue can override them — so this
-// guarantees the pill renders correctly regardless of what's happening in
-// globals.css/layout.tsx.
 const pillStyle: React.CSSProperties = {
   width: '100%',
   display: 'flex',
+  flexDirection: 'column',
   alignItems: 'center',
-  justifyContent: 'space-between',
+  justifyContent: 'center',
   backgroundColor: '#111111',
   color: '#ffffff',
   border: 'none',
-  borderRadius: '999px',
-  padding: '14px 20px',
-  fontSize: '14px',
-  fontWeight: 700,
+  borderRadius: '20px',
+  padding: '14px 44px', // extra horizontal padding so text doesn't collide with the chevron
   cursor: 'pointer',
-  textAlign: 'left',
+  textAlign: 'center',
+  position: 'relative',
 };
+
+// NEW: splits a label like "Skate Shops (Skateboards, Scooters & Helmets)"
+// into { title: "Skate Shops", detail: "Skateboards, Scooters & Helmets" }.
+// Falls back to treating the whole label as the title if no bracket is found,
+// so this never breaks on a label without a bracketed section.
+function parseLabel(label: string): { title: string; detail: string | null } {
+  const match = label.match(/^(.+?)\s*\(([\s\S]*)\)\s*$/);
+  if (match) {
+    return { title: match[1].trim(), detail: match[2].trim() };
+  }
+  return { title: label.trim(), detail: null };
+}
 
 export default function SearchPage() {
   const [query, setQuery] = useState<string>('');
@@ -102,11 +101,10 @@ export default function SearchPage() {
     performSearch();
   }
 
-
   function renderListItem(place: PlaceResult, index: number) {
     return (
       <li key={index}>
-        <span className="place-name">{place.name}</span>
+        <span className="place-name">{place.name}</span>{' '}
         <span className="place-distance">{place.distance_km} km</span>
       </li>
     );
@@ -114,6 +112,8 @@ export default function SearchPage() {
 
   function renderDropdown(stateKey: string, label: string, items: PlaceResult[]) {
     const isOpen = openDropdowns[stateKey];
+    const { title, detail } = parseLabel(label);
+
     return (
       <div className="dropdown" key={stateKey}>
         <button
@@ -123,7 +123,8 @@ export default function SearchPage() {
           onClick={() => toggleDropdown(stateKey)}
           aria-expanded={isOpen}
         >
-          <span>{items.length} {label}</span>
+          <span className="pill-title">{items.length} {title}</span>
+          {detail && <span className="pill-detail">({detail})</span>}
           <span className={`chevron ${isOpen ? 'chevron-open' : ''}`}>▾</span>
         </button>
         {isOpen && (
@@ -177,22 +178,26 @@ export default function SearchPage() {
         <div className="results-layout">
           <div className="competitors-column">
             <h2 className="column-heading">Local Competitors</h2>
-            {Object.entries(data.competitors).map(([label, items]) =>
-              renderDropdown(`competitor:${label}`, label, items)
-            )}
-            {Object.keys(data.competitors).length === 0 && (
-              <p className="empty-note">None found nearby.</p>
-            )}
+            <div className="dropdown-list">
+              {Object.entries(data.competitors).map(([label, items]) =>
+                renderDropdown(`competitor:${label}`, label, items)
+              )}
+              {Object.keys(data.competitors).length === 0 && (
+                <p className="empty-note">None found nearby.</p>
+              )}
+            </div>
           </div>
 
           <div className="opportunities-column">
             <h2 className="column-heading">Local Opportunities</h2>
-            {Object.entries(data.opportunities).map(([label, items]) =>
-              renderDropdown(`opportunity:${label}`, label, items)
-            )}
-            {Object.keys(data.opportunities).length === 0 && (
-              <p className="empty-note">None found nearby.</p>
-            )}
+            <div className="dropdown-list">
+              {Object.entries(data.opportunities).map(([label, items]) =>
+                renderDropdown(`opportunity:${label}`, label, items)
+              )}
+              {Object.keys(data.opportunities).length === 0 && (
+                <p className="empty-note">None found nearby.</p>
+              )}
+            </div>
           </div>
         </div>
       )}
@@ -327,30 +332,51 @@ export default function SearchPage() {
           text-align: center;
         }
 
+        /* NEW: real gap between pills via flex, rather than relying on
+           per-item margins that can end up looking like they're touching. */
+        .dropdown-list {
+          display: flex;
+          flex-direction: column;
+          gap: 14px;
+        }
+
         .dropdown {
-          margin-bottom: 16px;
+          width: 100%;
         }
 
-        .dropdown:last-child {
-          margin-bottom: 0;
+        /* NEW: title line — bigger + bolder than the detail line below it */
+        .pill-title {
+          font-size: 15px;
+          font-weight: 700;
+          line-height: 1.3;
         }
 
-        /* Hover transition kept here since inline styles can't do :hover.
-           Base colors are now guaranteed by the inline style prop instead. */
+        /* NEW: bracketed detail line — smaller, dimmer, sits under the title */
+        .pill-detail {
+          font-size: 12px;
+          font-weight: 500;
+          color: rgba(255, 255, 255, 0.65);
+          line-height: 1.3;
+          margin-top: 2px;
+        }
+
         .dropdown-heading:hover {
           background: #2a2a2a;
         }
 
+        /* NEW: chevron floats on the right instead of sitting inline,
+           since the pill content is now a centered two-line stack. */
         .chevron {
-          display: inline-block;
-          flex-shrink: 0;
-          margin-left: 12px;
+          position: absolute;
+          right: 18px;
+          top: 50%;
+          transform: translateY(-50%);
           transition: transform 0.15s ease;
           font-size: 12px;
         }
 
         .chevron-open {
-          transform: rotate(180deg);
+          transform: translateY(-50%) rotate(180deg);
         }
 
         .dropdown-panel {
