@@ -1,5 +1,6 @@
 import os
 import math
+import re
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -294,6 +295,71 @@ SEARCH_PLAN_TOOL = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Helpers for parsing/merging labels of the form "Title (detail & detail)"
+# ---------------------------------------------------------------------------
+
+_LABEL_RE = re.compile(r'^(.+?)\s*\(([\s\S]*)\)\s*$')
+
+
+def _split_label(label: str) -> tuple[str, str | None]:
+    match = _LABEL_RE.match(label)
+    if match:
+        return match.group(1).strip(), match.group(2).strip()
+    return label.strip(), None
+
+
+def _merge_details(labels: list[str]) -> list[str]:
+    details: list[str] = []
+    for label in labels:
+        _, detail = _split_label(label)
+        if detail:
+            details.extend(d.strip() for d in detail.split('&'))
+    return list(dict.fromkeys(d for d in details if d))
+
+
+# ---------------------------------------------------------------------------
+# NEW: collapse plan entries that resolve to an identical Google Places
+# search, so the same real-world venue type never gets shown twice under
+# two separately-labelled dropdowns.
+# ---------------------------------------------------------------------------
+#
+# Claude sometimes assigns two different source_products (e.g. "Skateboards"
+# and "Scooters") to what is, in Google's eyes, the exact same search
+# (method="nearby_type", value="skateboard_park"). Since each entry's label
+# gets a different bracketed suffix per source_product (e.g. "Skateparks
+# (Skateboards)" vs "Skateparks (Scooters)"), the two entries end up as
+# different dict keys downstream and both get shown — as an identical
+# duplicate dropdown, since the underlying search and results are the same.
+# This merges any entries with the same (category, method, value) into one,
+# combining their bracketed product lists rather than silently dropping one.
+# NOTE: this only catches EXACT search duplicates. For entries that use
+# genuinely different search methods/values but still return mostly the
+# same real-world places (e.g. "Skateparks" vs "Scooter Parks" — see
+# merge_overlapping_result_entries below), this alone isn't enough.
+
+def merge_duplicate_entries(entries: list[SearchPlanEntry]) -> list[SearchPlanEntry]:
+    merged: dict[tuple[str, str, str], SearchPlanEntry] = {}
+    order: list[tuple[str, str, str]] = []
+
+    for entry in entries:
+        key = (entry.category, entry.method, entry.value.strip().lower())
+
+        if key not in merged:
+            merged[key] = entry
+            order.append(key)
+            continue
+
+        existing = merged[key]
+        existing_title, _ = _split_label(existing.label)
+        deduped_details = _merge_details([existing.label, entry.label])
+
+        new_label = existing_title if not deduped_details else f"{existing_title} ({' & '.join(deduped_details)})"
+        merged[key] = existing.model_copy(update={"label": new_label})
+
+    return [merged[k] for k in order]
+
+
 def get_search_plan(business_name: str, google_types: list[str], product_list: list[str]) -> SearchPlan:
     prompt = build_search_plan_prompt(business_name, google_types, product_list)
 
@@ -325,6 +391,11 @@ def get_search_plan(business_name: str, google_types: list[str], product_list: l
         if entry.source_product.strip().lower() in relevant_lower
     ]
 
+    # Merge entries that resolve to an identical Google Places search
+    # (same category/method/value) so they never show up as a duplicate
+    # dropdown with identical results under two different labels.
+    plan.entries = merge_duplicate_entries(plan.entries)
+
     # TEMP DEBUG — remove once you're done inspecting
     print(f"[classification] {plan.business_classification!r}")
     print(f"[relevant_products] {plan.relevant_products!r}")
@@ -332,6 +403,262 @@ def get_search_plan(business_name: str, google_types: list[str], product_list: l
         print(f"[{entry.category}] {entry.label!r} -> method={entry.method}, value={entry.value!r}, source_product={entry.source_product!r}")
 
     return plan
+
+
+# ---------------------------------------------------------------------------
+# NEW: merge entries whose RESULTS overlap heavily, even if their search
+# method/value were different.
+# ---------------------------------------------------------------------------
+#
+# This catches cases like "Skateparks" (nearby_type=skateboard_park) and
+# "Scooter Parks" (a separate text_search) which are different searches on
+# paper, but in practice return mostly the same physical parks — because a
+# skatepark and a "scooter park" are usually the same real-world venue.
+# Rather than trying to predict this from the search plan alone (which
+# hasn't reliably worked, even with explicit prompt instructions telling
+# Claude not to split these), this runs AFTER the actual Google results are
+# in and merges any two same-category entries whose result sets overlap by
+# at least `overlap_threshold` of the smaller entry's item count.
+
+def merge_overlapping_result_entries(
+    entries: dict[str, list[dict]],
+    overlap_threshold: float = 0.4,
+) -> dict[str, list[dict]]:
+    labels = list(entries.keys())
+    n = len(labels)
+    parent = list(range(n))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    def keyset(label: str) -> set[str]:
+        return {item.get("place_id") or item["name"].strip().lower() for item in entries[label]}
+
+    keysets = [keyset(label) for label in labels]
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = keysets[i], keysets[j]
+            if not a or not b:
+                continue
+            overlap = len(a & b)
+            smaller = min(len(a), len(b))
+            if smaller and (overlap / smaller) >= overlap_threshold:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    new_entries: dict[str, list[dict]] = {}
+    for group in groups.values():
+        if len(group) == 1:
+            idx = group[0]
+            new_entries[labels[idx]] = entries[labels[idx]]
+            continue
+
+        # Pick the label of whichever entry in the group has the most
+        # items as the "winning" title — usually the broader/more
+        # complete search — and fold every other label's bracketed
+        # detail into it rather than discarding it.
+        group_sorted = sorted(group, key=lambda i: len(entries[labels[i]]), reverse=True)
+        winner_idx = group_sorted[0]
+        winner_title, _ = _split_label(labels[winner_idx])
+        deduped_details = _merge_details([labels[idx] for idx in group_sorted])
+
+        merged_label = winner_title if not deduped_details else f"{winner_title} ({' & '.join(deduped_details)})"
+
+        seen_keys: set[str] = set()
+        merged_items: list[dict] = []
+        for idx in group:
+            for item in entries[labels[idx]]:
+                key = item.get("place_id") or item["name"].strip().lower()
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                merged_items.append(item)
+        merged_items.sort(key=lambda r: r["distance_km"])
+
+        new_entries[merged_label] = merged_items
+
+    return new_entries
+
+
+# ---------------------------------------------------------------------------
+# NEW: Claude call — post-search relevance filter + cross-entry dedup
+# ---------------------------------------------------------------------------
+#
+# This runs AFTER all Google Places results have been gathered. It sees
+# every entry's results side-by-side, so it can:
+#   1. Drop items that are obviously irrelevant to their entry's label
+#      (e.g. a firearms store under "Sports Stores").
+#   2. Catch the same business appearing under multiple entries (e.g. a
+#      bike shop showing up under both "Bike Shops" AND "Sports Stores")
+#      and keep it in ONLY the single most specific entry.
+#
+# We deliberately send indices, not full place_ids, in the prompt — it's
+# far cheaper token-wise, and we map the indices back to the real result
+# dicts in Python afterwards, so nothing relies on Claude echoing IDs back
+# correctly.
+
+FILTER_TOOL = {
+    "name": "filter_search_results",
+    "description": "Decide which results to keep in each entry, removing irrelevant results and cross-entry duplicates.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "entries": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "entry_index": {
+                            "type": "integer",
+                            "description": "The 0-based index of the entry, matching the ENTRY numbering given in the prompt."
+                        },
+                        "keep_item_indices": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "0-based indices of items (local to this entry's own [n] numbering) to KEEP. Omit an index if that item should be removed — either because it's irrelevant to this entry, or because it's a duplicate being kept in a different, better-fitting entry instead."
+                        }
+                    },
+                    "required": ["entry_index", "keep_item_indices"],
+                },
+                "description": "Must include exactly one object per entry index, covering every entry from 0 to the last one shown in the prompt, even if keep_item_indices is empty."
+            }
+        },
+        "required": ["entries"],
+    },
+}
+
+
+def build_filter_prompt(business_name: str, indexed_entries: list[dict]) -> str:
+    lines = [
+        f'You are reviewing a set of nearby business search results gathered for '
+        f'"{business_name}", a real business we represent for B2B sales purposes.',
+        'Below is a numbered list of ENTRIES (search categories). Each entry contains '
+        'a numbered list of ITEMS (real businesses found nearby under that search).',
+        '',
+    ]
+
+    for idx, entry in enumerate(indexed_entries):
+        lines.append(f'ENTRY {idx} — "{entry["label"]}" ({entry["category"]}):')
+        if not entry["items"]:
+            lines.append('  (no items)')
+        for item_idx, item in enumerate(entry["items"]):
+            lines.append(f'  [{item_idx}] {item["name"]}')
+        lines.append('')
+
+    lines.append("""Your job has two parts:
+
+1. RELEVANCE FILTERING: For each entry, review its items and decide which ones
+are genuinely relevant to that entry's label and category, given the business
+we represent. Remove items that are obviously, clearly unrelated to the entry
+— for example a firearms store or a lawn bowls pro shop showing up under a
+general "Sports Stores" entry, or a swimming pool supplier showing up under a
+"Skate Shops" entry. If you are UNSURE whether an item is relevant — for
+example a surf shop showing up under "Skate Shops", where surf shops commonly
+also sell skateboards — always err on the side of KEEPING the item rather
+than removing it. Only remove items that are clearly, obviously unrelated.
+
+2. CROSS-ENTRY DEDUPLICATION: The same real business may appear as an item in
+more than one entry (e.g. a bike shop that also gets picked up by a more
+general search like "Sports Stores"). If the same business name appears in
+more than one entry, it should only be kept in the SINGLE entry that best and
+most specifically matches what that business actually is (e.g. keep a
+dedicated bike shop under "Bike Shops", not also under a more generic "Sports
+Stores" entry). Remove it from every other, less specific entry it appears in.
+
+Return, for EVERY entry index from 0 to the last one shown above, the list of
+item indices (using the local [n] numbering shown for that entry) that should
+be KEPT. Omit an item's index if it should be removed for either reason
+above. It is fine for an entry's keep_item_indices to be an empty list if
+every item in it should be removed.""")
+
+    return "\n".join(lines)
+
+
+def apply_relevance_filter(
+    business_name: str,
+    opportunities: dict[str, list[dict]],
+    competitors: dict[str, list[dict]],
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    # Build one flat, ordered list of entries so we can map Claude's
+    # indices back to the right dict + label afterwards.
+    indexed_entries = []
+    for label, items in competitors.items():
+        indexed_entries.append({"origin": "competitor", "label": label, "category": "competitor", "items": items})
+    for label, items in opportunities.items():
+        indexed_entries.append({"origin": "opportunity", "label": label, "category": "opportunity", "items": items})
+
+    # Nothing to filter — skip the extra API call entirely.
+    if not indexed_entries or not any(e["items"] for e in indexed_entries):
+        return opportunities, competitors
+
+    prompt = build_filter_prompt(business_name, indexed_entries)
+
+    try:
+        message = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=2048,
+            tools=[FILTER_TOOL],
+            tool_choice={"type": "tool", "name": "filter_search_results"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+        tool_use_block = next((b for b in message.content if b.type == "tool_use"), None)
+        if tool_use_block is None:
+            raise ValueError("Claude did not return a tool_use block")
+        result_entries = tool_use_block.input.get("entries", [])
+    except Exception as e:
+        # Fail-open: if this call breaks for any reason (network error,
+        # bad response, rate limit, etc.), return the ORIGINAL unfiltered
+        # results rather than losing the whole scan over a filtering step.
+        print(f"[relevance filter] failed, skipping filter: {e!r}")
+        return opportunities, competitors
+
+    keep_map: dict[int, set[int]] = {}
+    for r in result_entries:
+        try:
+            entry_index = int(r["entry_index"])
+            keep_indices = {int(i) for i in r.get("keep_item_indices", [])}
+            keep_map[entry_index] = keep_indices
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    new_opportunities: dict[str, list[dict]] = {}
+    new_competitors: dict[str, list[dict]] = {}
+
+    for idx, entry in enumerate(indexed_entries):
+        keep_indices = keep_map.get(idx)
+        if keep_indices is None:
+            # This entry was missing from Claude's response — fail-open
+            # and keep everything for it, rather than silently dropping
+            # an entire entry's results due to an incomplete response.
+            filtered_items = entry["items"]
+        else:
+            filtered_items = [
+                item for item_idx, item in enumerate(entry["items"])
+                if item_idx in keep_indices
+            ]
+
+        removed_count = len(entry["items"]) - len(filtered_items)
+        if removed_count:
+            print(f"[relevance filter] {entry['label']!r}: removed {removed_count} item(s)")
+
+        if entry["origin"] == "competitor":
+            new_competitors[entry["label"]] = filtered_items
+        else:
+            new_opportunities[entry["label"]] = filtered_items
+
+    return new_opportunities, new_competitors
 
 
 # ---------------------------------------------------------------------------
@@ -392,7 +719,12 @@ async def scan_location(
                     continue
 
                 name = p["displayName"]["text"]
-                results_with_distance.append({"name": name, "distance_km": distance_km})
+                place_id = p.get("id", "")
+                results_with_distance.append({
+                    "name": name,
+                    "distance_km": distance_km,
+                    "place_id": place_id,
+                })
 
             results_with_distance.sort(key=lambda r: r["distance_km"])
 
@@ -408,6 +740,18 @@ async def scan_location(
                 opportunities[entry.label] = deduped_results
             else:
                 competitors[entry.label] = deduped_results
+
+        # NEW: merge entries whose actual results overlap heavily, even if
+        # their search method/value on paper were different (e.g.
+        # "Skateparks" and "Scooter Parks" usually returning the same
+        # physical parks). This runs before the relevance filter so we
+        # don't waste a filter pass on entries we're about to merge anyway.
+        opportunities = merge_overlapping_result_entries(opportunities)
+        competitors = merge_overlapping_result_entries(competitors)
+
+        # Relevance + cross-entry dedup pass, using everything we've
+        # gathered so far across all entries.
+        opportunities, competitors = apply_relevance_filter(business_name, opportunities, competitors)
 
     return {
         "anchor": {

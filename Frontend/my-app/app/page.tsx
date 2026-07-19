@@ -1,10 +1,12 @@
-'use client'; // needed for useState and interactivity in the App Router
+'use client';
 
 import { useState } from 'react';
+import styles from './SearchPage.module.css';
 
 interface PlaceResult {
   name: string;
   distance_km: number;
+  place_id: string;
 }
 
 interface ScanResult {
@@ -28,23 +30,28 @@ const PRODUCT_CATEGORIES = [
 const pillStyle: React.CSSProperties = {
   width: '100%',
   display: 'flex',
-  flexDirection: 'column',
   alignItems: 'center',
-  justifyContent: 'center',
+  justifyContent: 'flex-start',
   backgroundColor: '#111111',
   color: '#ffffff',
   border: 'none',
-  borderRadius: '20px',
-  padding: '14px 44px', // extra horizontal padding so text doesn't collide with the chevron
+  borderRadius: '999px',
+  padding: '14px 20px',
+  fontSize: '14px',
+  fontWeight: 700,
   cursor: 'pointer',
-  textAlign: 'center',
+  textAlign: 'left',
   position: 'relative',
 };
 
-// NEW: splits a label like "Skate Shops (Skateboards, Scooters & Helmets)"
-// into { title: "Skate Shops", detail: "Skateboards, Scooters & Helmets" }.
-// Falls back to treating the whole label as the title if no bracket is found,
-// so this never breaks on a label without a bracketed section.
+function buildMapsUrl(place: PlaceResult): string {
+  const query = encodeURIComponent(place.name);
+  if (!place.place_id) {
+    return `https://www.google.com/maps/search/?api=1&query=${query}`;
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${query}&query_place_id=${place.place_id}`;
+}
+
 function parseLabel(label: string): { title: string; detail: string | null } {
   const match = label.match(/^(.+?)\s*\(([\s\S]*)\)\s*$/);
   if (match) {
@@ -59,9 +66,15 @@ export default function SearchPage() {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openDropdowns, setOpenDropdowns] = useState<Record<string, boolean>>({});
+  const [openDetails, setOpenDetails] = useState<Record<string, boolean>>({});
 
   function toggleDropdown(key: string) {
     setOpenDropdowns((prev) => ({ ...prev, [key]: !prev[key] }));
+  }
+
+  function toggleDetail(e: React.MouseEvent | React.KeyboardEvent, key: string) {
+    e.stopPropagation();
+    setOpenDetails((prev) => ({ ...prev, [key]: !prev[key] }));
   }
 
   function handleInputChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -75,6 +88,7 @@ export default function SearchPage() {
     setError(null);
     setData(null);
     setOpenDropdowns({});
+    setOpenDetails({});
 
     try {
       const productsParam = encodeURIComponent(PRODUCT_CATEGORIES.join(','));
@@ -103,36 +117,116 @@ export default function SearchPage() {
 
   function renderListItem(place: PlaceResult, index: number) {
     return (
-      <li key={index}>
-        <span className="place-name">{place.name}</span>{' '}
-        <span className="place-distance">{place.distance_km} km</span>
+      <li key={index} className={styles.placeItem}>
+        
+          <a href={buildMapsUrl(place)}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={styles.placeLink}
+        >
+          <span className={styles.placeBullet} aria-hidden="true" />
+          <span className={styles.placeName}>{place.name}</span>
+          <span className={styles.placeDistance}>{place.distance_km} km</span>
+        </a>
       </li>
     );
   }
 
   function renderDropdown(stateKey: string, label: string, items: PlaceResult[]) {
     const isOpen = openDropdowns[stateKey];
+    const isDetailOpen = openDetails[stateKey];
     const { title, detail } = parseLabel(label);
 
     return (
-      <div className="dropdown" key={stateKey}>
+      <div className={styles.dropdown} key={stateKey} style={{ position: 'relative' }}>
         <button
           type="button"
-          className="dropdown-heading"
+          className={styles.dropdownHeading}
           style={pillStyle}
           onClick={() => toggleDropdown(stateKey)}
           aria-expanded={isOpen}
         >
-          <span className="pill-title">{items.length} {title}</span>
-          {detail && <span className="pill-detail">({detail})</span>}
-          <span className={`chevron ${isOpen ? 'chevron-open' : ''}`}>▾</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+            <span className={styles.pillTitle}>{items.length} {title}</span>
+            <span className={`${styles.chevron} ${isOpen ? styles.chevronOpen : ''}`}>▾</span>
+          </span>
         </button>
+
+        {detail && (
+          <div
+            role="button"
+            tabIndex={0}
+            aria-label="Show details"
+            onClick={(e) => toggleDetail(e, stateKey)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' || e.key === ' ') toggleDetail(e, stateKey);
+            }}
+            style={{
+              position: 'absolute',
+              top: '-8px',
+              right: '-8px',
+              width: '28px',
+              height: '28px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              cursor: 'pointer',
+              userSelect: 'none',
+              zIndex: 20,
+            }}
+          >
+            <span
+              style={{
+                width: '18px',
+                height: '18px',
+                borderRadius: '50%',
+                backgroundColor: '#ffffff',
+                border: '1.5px solid #dc2626',
+                color: '#dc2626',
+                fontSize: '11px',
+                fontWeight: 800,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                lineHeight: 1,
+              }}
+            >
+              ?
+            </span>
+          </div>
+        )}
+
+        {detail && isDetailOpen && (
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              position: 'absolute',
+              top: '0',
+              right: 'calc(100% + 10px)',
+              backgroundColor: '#ffffff',
+              color: '#1a1a1a',
+              border: '1.5px solid #111111',
+              borderRadius: '10px',
+              padding: '8px 12px',
+              fontSize: '12px',
+              fontWeight: 500,
+              lineHeight: 1.4,
+              width: 'max-content',
+              maxWidth: '220px',
+              zIndex: 30,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
+            }}
+          >
+            ({detail})
+          </div>
+        )}
+
         {isOpen && (
-          <div className="dropdown-panel">
+          <div className={styles.dropdownPanel}>
             {items.length > 0 ? (
-              <ul className="item-list">{items.map(renderListItem)}</ul>
+              <ul className={styles.itemList}>{items.map(renderListItem)}</ul>
             ) : (
-              <p className="empty-note">None found nearby.</p>
+              <p className={styles.emptyNote}>None found nearby.</p>
             )}
           </div>
         )}
@@ -141,308 +235,66 @@ export default function SearchPage() {
   }
 
   return (
-    <div className="page">
-      <div className="content">
-        <div className="product-chips">
+    <div className={styles.page}>
+      <div className={styles.content}>
+        <div className={styles.productChips}>
           {PRODUCT_CATEGORIES.map((product) => (
-            <span key={product} className="chip">
+            <span key={product} className={styles.chip}>
               {product}
             </span>
           ))}
         </div>
 
-        <form onSubmit={handleSubmit} className="search-form">
+        <form onSubmit={handleSubmit} className={styles.searchForm}>
           <input
             type="text"
             value={query}
             onChange={handleInputChange}
             placeholder="Search a company..."
-            className="search-input"
+            className={styles.searchInput}
           />
-          <button type="submit" className="search-button" disabled={isLoading}>
+          <button type="submit" className={styles.searchButton} disabled={isLoading}>
             {isLoading ? 'Searching...' : 'Search'}
           </button>
         </form>
 
-        {error && <p className="error-message">{error}</p>}
+        {error && <p className={styles.errorMessage}>{error}</p>}
 
         {data && (
-          <div className="anchor-block">
-            <h1 className="company-name">{data.anchor.name}</h1>
-            <p className="location">{data.anchor.address ?? 'Address unavailable'}</p>
+          <div className={styles.anchorBlock}>
+            <h1 className={styles.companyName}>{data.anchor.name}</h1>
+            <p className={styles.location}>{data.anchor.address ?? 'Address unavailable'}</p>
           </div>
         )}
       </div>
 
       {data && (
-        <div className="results-layout">
-          <div className="competitors-column">
-            <h2 className="column-heading">Local Competitors</h2>
-            <div className="dropdown-list">
+        <div className={styles.resultsLayout}>
+          <div className={styles.competitorsColumn}>
+            <h2 className={styles.columnHeading}>Local Competitors</h2>
+            <div className={styles.dropdownList}>
               {Object.entries(data.competitors).map(([label, items]) =>
                 renderDropdown(`competitor:${label}`, label, items)
               )}
               {Object.keys(data.competitors).length === 0 && (
-                <p className="empty-note">None found nearby.</p>
+                <p className={styles.emptyNote}>None found nearby.</p>
               )}
             </div>
           </div>
 
-          <div className="opportunities-column">
-            <h2 className="column-heading">Local Opportunities</h2>
-            <div className="dropdown-list">
+          <div className={styles.opportunitiesColumn}>
+            <h2 className={styles.columnHeading}>Local Opportunities</h2>
+            <div className={styles.dropdownList}>
               {Object.entries(data.opportunities).map(([label, items]) =>
                 renderDropdown(`opportunity:${label}`, label, items)
               )}
               {Object.keys(data.opportunities).length === 0 && (
-                <p className="empty-note">None found nearby.</p>
+                <p className={styles.emptyNote}>None found nearby.</p>
               )}
             </div>
           </div>
         </div>
       )}
-
-      <style jsx>{`
-        .page {
-          background: #fafafa;
-          min-height: 100vh;
-          width: 100%;
-          color: #1a1a1a;
-          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-        }
-
-        .content {
-          width: 100%;
-          max-width: 560px;
-          margin: 0 auto;
-          padding: 60px 24px 0;
-        }
-
-        .product-chips {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 8px;
-          margin-bottom: 16px;
-        }
-
-        .chip {
-          background: #ffffff;
-          border: 1px solid rgba(0, 0, 0, 0.15);
-          border-radius: 999px;
-          padding: 6px 14px;
-          font-size: 13px;
-          color: #333333;
-        }
-
-        .search-form {
-          display: flex;
-          align-items: center;
-          width: 100%;
-          background: #ececf2;
-          border: none;
-          border-radius: 999px;
-          overflow: hidden;
-        }
-
-        .search-input {
-          flex: 1;
-          background: transparent;
-          border: none;
-          outline: none;
-          padding: 14px 20px;
-          font-size: 15px;
-          color: #111111;
-        }
-
-        .search-input::placeholder {
-          color: rgba(0, 0, 0, 0.4);
-        }
-
-        .search-button {
-          background: transparent;
-          border: none;
-          color: #333333;
-          padding: 14px 20px;
-          font-size: 15px;
-          cursor: pointer;
-        }
-
-        .search-button:disabled {
-          color: rgba(0, 0, 0, 0.3);
-          cursor: not-allowed;
-        }
-
-        .error-message {
-          margin-top: 16px;
-          padding: 12px 16px;
-          background: #fde8e8;
-          color: #9b1c1c;
-          border-radius: 8px;
-          font-size: 14px;
-        }
-
-        .anchor-block {
-          margin-top: 24px;
-        }
-
-        .company-name {
-          font-size: 30px;
-          font-weight: 800;
-          margin-bottom: 4px;
-          color: #111111;
-        }
-
-        .location {
-          font-size: 14px;
-          color: rgba(0, 0, 0, 0.5);
-          margin: 0;
-        }
-
-        .results-layout {
-          display: grid;
-          grid-template-columns: 1fr 1fr;
-          gap: 60px;
-          max-width: 900px;
-          margin: 48px auto 60px;
-          padding: 0 40px;
-          align-items: start;
-        }
-
-        .competitors-column {
-          justify-self: start;
-          width: 100%;
-          max-width: 280px;
-        }
-
-        .opportunities-column {
-          justify-self: center;
-          width: 100%;
-          max-width: 280px;
-        }
-
-        .column-heading {
-          font-size: 17px;
-          font-weight: 700;
-          color: #111111;
-          margin-bottom: 16px;
-          text-align: left;
-        }
-
-        .opportunities-column .column-heading {
-          text-align: center;
-        }
-
-        /* NEW: real gap between pills via flex, rather than relying on
-           per-item margins that can end up looking like they're touching. */
-        .dropdown-list {
-          display: flex;
-          flex-direction: column;
-          gap: 14px;
-        }
-
-        .dropdown {
-          width: 100%;
-        }
-
-        /* NEW: title line — bigger + bolder than the detail line below it */
-        .pill-title {
-          font-size: 15px;
-          font-weight: 700;
-          line-height: 1.3;
-        }
-
-        /* NEW: bracketed detail line — smaller, dimmer, sits under the title */
-        .pill-detail {
-          font-size: 12px;
-          font-weight: 500;
-          color: rgba(255, 255, 255, 0.65);
-          line-height: 1.3;
-          margin-top: 2px;
-        }
-
-        .dropdown-heading:hover {
-          background: #2a2a2a;
-        }
-
-        /* NEW: chevron floats on the right instead of sitting inline,
-           since the pill content is now a centered two-line stack. */
-        .chevron {
-          position: absolute;
-          right: 18px;
-          top: 50%;
-          transform: translateY(-50%);
-          transition: transform 0.15s ease;
-          font-size: 12px;
-        }
-
-        .chevron-open {
-          transform: translateY(-50%) rotate(180deg);
-        }
-
-        .dropdown-panel {
-          background: #ffffff;
-          border: 1px solid rgba(0, 0, 0, 0.1);
-          border-radius: 16px;
-          margin-top: 8px;
-          overflow: hidden;
-          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
-        }
-
-        .item-list {
-          list-style: none;
-          padding: 0;
-          margin: 0;
-        }
-
-        .item-list li {
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 12px;
-          padding: 12px 16px;
-          border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-          font-size: 14px;
-          color: #1a1a1a;
-        }
-
-        .place-name {
-          font-weight: 600;
-        }
-
-        .place-distance {
-          flex-shrink: 0;
-          font-size: 12px;
-          font-weight: 500;
-          color: rgba(0, 0, 0, 0.45);
-        }
-
-        .item-list li:last-child {
-          border-bottom: none;
-        }
-
-        .empty-note {
-          font-size: 14px;
-          color: rgba(0, 0, 0, 0.4);
-          font-style: italic;
-          padding: 12px 16px;
-          margin: 0;
-        }
-
-        @media (max-width: 700px) {
-          .results-layout {
-            grid-template-columns: 1fr;
-            gap: 32px;
-          }
-          .competitors-column,
-          .opportunities-column {
-            justify-self: stretch;
-            max-width: none;
-          }
-          .opportunities-column .column-heading {
-            text-align: left;
-          }
-        }
-      `}</style>
     </div>
   );
 }
