@@ -582,7 +582,9 @@ def merge_overlapping_result_entries(
 
 
 # ---------------------------------------------------------------------------
-# Claude call — global category re-assignment
+# Claude call — global category re-assignment (OLD APPROACH, no longer
+# called from scan_location — replaced by the simpler batch per-category
+# filter below. Left in place in case we want to revert.)
 # ---------------------------------------------------------------------------
 #
 # This works on the UNIQUE set of places found across every category
@@ -769,6 +771,150 @@ def apply_relevance_filter(
         new_opportunities[label].sort(key=lambda r: r["distance_km"])
 
     return new_opportunities, new_competitors
+
+
+# ---------------------------------------------------------------------------
+# Simple ALL-categories-at-once Claude filter — CURRENT APPROACH, called
+# from scan_location. One prompt listing every searched category and its
+# place list, "What from these locations are actually a {category}?" per
+# category, all sent in a single call. One tool response with, per
+# category, the indices of places that genuinely belong to that category.
+# No cross-category reassignment, no merging, no relevance judgement about
+# the target business — just a straightforward keep/drop decision for each
+# place against the specific category it was searched under.
+# ---------------------------------------------------------------------------
+
+# Category -> keywords that, if found in a place's name, mean it should
+# always be kept for that category, no AI judgement call needed (e.g. a
+# place literally called "Henrietta Skate" being searched under "Skate
+# Shop" should never be filtered out). Applied AFTER Claude's response as
+# a forced union — even if Claude says drop it, a keyword match wins.
+CATEGORY_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "Sports Store": ("sport",),
+    "Pharmacy": ("pharmacy", "chemist"),
+    "Oval": ("oval",),
+    "Rugby Club": ("rugby",),
+    "AFL Club": ("afl",),
+    "Cricket Club": ("cricket",),
+    "Martial Arts Gym": ("martial",),
+    "Boxing Gym": ("boxing",),
+    "Skate Shop": ("skate",),
+    "Surf Shop": ("surf",),
+    "Bike Shop": ("bike", "bicycle", "cycle"),
+    "Skatepark": ("skate",),
+    "BMX Track": ("bmx",),
+}
+
+
+def _forced_keep_indices(category: str, items: list[dict]) -> set[int]:
+    keywords = CATEGORY_KEYWORDS.get(category, ())
+    if not keywords:
+        return set()
+    forced = set()
+    for i, item in enumerate(items):
+        name_lower = item["name"].strip().lower()
+        if any(kw in name_lower for kw in keywords):
+            forced.add(i)
+    return forced
+
+
+BATCH_CATEGORY_FILTER_TOOL = {
+    "name": "filter_places",
+    "description": "For each category, return the indices of places from its list that are genuinely that category.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "results": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "category": {"type": "string"},
+                        "keep_indices": {
+                            "type": "array",
+                            "items": {"type": "integer"},
+                            "description": "Indices (from that category's numbered list) of places that are genuinely a match.",
+                        },
+                    },
+                    "required": ["category", "keep_indices"],
+                },
+                "description": "One entry per category, covering every category given in the prompt.",
+            },
+        },
+        "required": ["results"],
+    },
+}
+
+
+def build_batch_filter_prompt(categorized_items: dict[str, list[dict]]) -> str:
+    lines = [
+        "If you're at all unsure whether a location genuinely belongs to its "
+        "category, lean towards keeping it rather than removing it. Only drop "
+        "something if it's clearly NOT that category.",
+        "",
+    ]
+    for category, items in categorized_items.items():
+        lines.append(f'Category:\n{category}')
+        lines.append('')
+        lines.append('Locations:')
+        for i, item in enumerate(items):
+            lines.append(f"[{i}] {item['name']}")
+        lines.append('')
+        lines.append(f'"What from these locations are actually a {category}?"')
+        lines.append('')
+    return "\n".join(lines)
+
+
+def filter_all_categories_with_claude(
+    categorized_items: dict[str, list[dict]],
+) -> dict[str, list[dict]]:
+    # Nothing to filter (no categories or every category empty)
+    if not categorized_items or not any(categorized_items.values()):
+        return categorized_items
+
+    prompt = build_batch_filter_prompt(categorized_items)
+
+    try:
+        message = claude_client.messages.create(
+            model=CLAUDE_MODEL,
+            max_tokens=4096,
+            tools=[BATCH_CATEGORY_FILTER_TOOL],
+            tool_choice={"type": "tool", "name": "filter_places"},
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        if message.stop_reason == "max_tokens":
+            raise ValueError("batch category filter response was truncated (max_tokens)")
+
+        tool_use_block = next((b for b in message.content if b.type == "tool_use"), None)
+        if tool_use_block is None:
+            raise ValueError("Claude did not return a tool_use block")
+
+        results_by_category: dict[str, set[int]] = {}
+        for r in tool_use_block.input.get("results", []):
+            category = r.get("category")
+            if category not in categorized_items:
+                continue
+            try:
+                results_by_category[category] = {int(i) for i in r.get("keep_indices", [])}
+            except (TypeError, ValueError):
+                continue
+
+        filtered: dict[str, list[dict]] = {}
+        for category, items in categorized_items.items():
+            if category in results_by_category:
+                keep = results_by_category[category] | _forced_keep_indices(category, items)
+                filtered[category] = [item for i, item in enumerate(items) if i in keep]
+            else:
+                # Claude didn't return anything for this category — fail-open, keep as-is.
+                filtered[category] = items
+
+        return filtered
+
+    except Exception as e:
+        # Fail-open: keep everything as-is rather than losing results.
+        print(f"[batch category filter] failed, skipping filter: {e!r}")
+        return categorized_items
 
 
 # ---------------------------------------------------------------------------
@@ -1027,9 +1173,18 @@ async def scan_location(
         # Deterministic type/name filter — disabled, was too aggressive.
         # competitors, opportunities = apply_type_and_name_filter(competitors, opportunities)
 
-        # Claude-based global category re-assignment — can move a place
-        # between categories, remove it entirely, or leave it as-is.
-        opportunities, competitors = apply_relevance_filter(business_name, opportunities, competitors)
+        # OLD Claude-based global category re-assignment — disabled in
+        # favor of the simpler batch per-category filter below.
+        # opportunities, competitors = apply_relevance_filter(business_name, opportunities, competitors)
+
+        # Simple all-categories-at-once filter: for every searched
+        # category (competitors + opportunities), ask Claude "what from
+        # these locations are actually a {category}?" in a single call,
+        # and use the returned filtered list per category.
+        merged_for_filter = {**competitors, **opportunities}
+        filtered = filter_all_categories_with_claude(merged_for_filter)
+        competitors = {k: filtered[k] for k in competitors}
+        opportunities = {k: filtered[k] for k in opportunities}
 
         # Deterministic safety net: force entries whose name contains a
         # bike/skate/surf/sport keyword into the matching category,
