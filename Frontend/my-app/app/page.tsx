@@ -27,6 +27,10 @@ const PRODUCT_CATEGORIES = [
   'Skate/Scooter/Bike Helmets',
 ];
 
+const PRODUCT_DISPLAY_NAMES: Record<string, string> = {
+  'Skate/Scooter/Bike Helmets': 'Helmets',
+}
+
 const pillStyle: React.CSSProperties = {
   width: '100%',
   display: 'flex',
@@ -136,6 +140,7 @@ export default function SearchPage() {
     const isOpen = openDropdowns[stateKey];
     const isDetailOpen = openDetails[stateKey];
     const { title, detail } = parseLabel(label);
+    const displayTitle = `${title}s`;
 
     return (
       <div className={styles.dropdown} key={stateKey} style={{ position: 'relative' }}>
@@ -147,7 +152,7 @@ export default function SearchPage() {
           aria-expanded={isOpen}
         >
           <span style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
-            <span className={styles.pillTitle}>{items.length} {title}</span>
+            <span className={styles.pillTitle}>{items.length} {displayTitle}</span>
             <span className={`${styles.chevron} ${isOpen ? styles.chevronOpen : ''}`}>▾</span>
           </span>
         </button>
@@ -240,7 +245,7 @@ export default function SearchPage() {
         <div className={styles.productChips}>
           {PRODUCT_CATEGORIES.map((product) => (
             <span key={product} className={styles.chip}>
-              {product}
+              {PRODUCT_DISPLAY_NAMES[product] ?? product}
             </span>
           ))}
         </div>
@@ -271,7 +276,7 @@ export default function SearchPage() {
       {data && (
         <div className={styles.resultsLayout}>
           <div className={styles.competitorsColumn}>
-            <h2 className={styles.columnHeading}>Local Competitors</h2>
+              <h2 className={styles.columnHeading} style={{ marginLeft: '100px'}}>Local Competitors</h2>
             <div className={styles.dropdownList}>
               {Object.entries(data.competitors).map(([label, items]) =>
                 renderDropdown(`competitor:${label}`, label, items)

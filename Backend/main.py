@@ -36,12 +36,141 @@ CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
 COMPETITOR_RADIUS_METERS = 10000
 OPPORTUNITY_RADIUS_METERS = 10000
 
-PLACE_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location"
 
+#product sets that much be searched before any ai ambiguous/creative search reasoning
+HARDCODED_SEARCHES = {
+    "Mouthguards": {
+        "Competitors": ["Sports Store", "Pharmacy"],
+        "Opportunities": ["Oval", "Rugby Club", "AFL Club", "Cricket Club", "Martial Arts Gym", "Boxing Gym"]
+    },
+
+    "Skateboards": {
+        "Competitors": ["Skate Shop", "Surf Shop", "Sports Store"],
+        "Opportunities": ["Skatepark"]
+    },
+
+    "Scooters": {
+        "Competitors": ["Bike Shop", "Skate Shop", "Surf Shop", "Sports Store"],
+        "Opportunities": ["Skatepark"]
+    },
+
+    "Knee_ElbowPads": {
+        "Competitors": ["Bike Shop", "Skate Shop", "Sports Store"],
+        "Opportunities": ["Skatepark", "BMX Track"]
+    },
+
+    "Skate_Scooter_Bike_Helmets": {
+        "Competitors": ["Skate Shop", "Bike Shop", "Sports Store"],
+        "Opportunities": ["Skatepark", "BMX Track"]
+    },
+}
+
+
+#lookup method and term for hardcoded opportunities and competitors
+SEARCH_TERM_LOOKUP: dict[str, tuple[str, str]] = {
+    "Sports Store": ("nearby_type", "sporting_goods_store"),
+    "Pharmacy": ("text_search", "pharmacy"),
+    "Oval": ("text_search", "ovals"),
+    "Rugby Club": ("text_search", "rugby club"),
+    "AFL Club": ("text_search", "AFL club"),
+    "Cricket Club": ("text_search", "cricket club"),
+    "Martial Arts Gym": ("text_search", "martial arts gym"),
+    "Boxing Gym": ("text_search", "boxing gym"),
+    "Skate Shop": ("text_search", "skate shop"),
+    "Surf Shop": ("text_search", "surf shop"),
+    "Bike Shop": ("nearby_type", "bicycle_store"),
+    "Skatepark": ("nearby_type", "skateboard_park"),
+    "BMX Track": ("text_search", "BMX track"),
+}
 
 # ---------------------------------------------------------------------------
+# Deterministic type/name filter — DISABLED (was too aggressive, dropping
+# genuinely correct results like "Bracken Ridge Skate Plaza" from
+# "Skate Shop" just because its name contains a venue-ish word). Left
+# defined in case it's useful again later in a softer form, but no longer
+# called from scan_location.
+# ---------------------------------------------------------------------------
+
+CATEGORY_TYPE_BUCKETS: dict[str, str] = {
+    "Sports Store": "store",
+    "Pharmacy": "store",
+    "Skate Shop": "store",
+    "Surf Shop": "store",
+    "Bike Shop": "store",
+    "Oval": "venue",
+    "Rugby Club": "venue",
+    "AFL Club": "venue",
+    "Cricket Club": "venue",
+    "Martial Arts Gym": "venue",
+    "Boxing Gym": "venue",
+    "Skatepark": "venue",
+    "BMX Track": "venue",
+}
+
+STORE_TYPES = {
+    "store", "sporting_goods_store", "bicycle_store", "clothing_store",
+    "shoe_store", "pharmacy", "drugstore", "sportswear_store",
+    "shopping_mall", "department_store",
+}
+VENUE_TYPES = {
+    "park", "skateboard_park", "playground", "sports_complex",
+    "sports_club", "sports_activity_location", "stadium", "gym",
+    "fitness_center", "arena", "amusement_center", "athletic_field",
+    "sports_coaching", "sports_school",
+}
+
+NAME_VENUE_WORDS = ("park", "reserve", "plaza", "skatepark", "track", "field", "oval", "club", "gym", "complex", "ground")
+NAME_STORE_WORDS = ("shop", "store", "cycles", "cycle", "pharmacy", "chemist", "bikes")
+
+
+def actual_bucket(place_types: list[str]) -> str | None:
+    types_set = set(place_types)
+    if types_set & STORE_TYPES:
+        return "store"
+    if types_set & VENUE_TYPES:
+        return "venue"
+    return None
+
+
+def resolve_category(place: dict, category: str) -> Literal["keep", "drop", "ambiguous"]:
+    expected_bucket = CATEGORY_TYPE_BUCKETS.get(category)
+    if expected_bucket is None:
+        return "ambiguous"
+
+    actual = actual_bucket(place.get("types", []))
+    if actual is not None:
+        return "keep" if actual == expected_bucket else "drop"
+
+    name_lower = place["name"].lower()
+    looks_like_venue = any(w in name_lower for w in NAME_VENUE_WORDS)
+    looks_like_store = any(w in name_lower for w in NAME_STORE_WORDS)
+
+    if looks_like_venue and not looks_like_store:
+        return "keep" if expected_bucket == "venue" else "drop"
+    if looks_like_store and not looks_like_venue:
+        return "keep" if expected_bucket == "store" else "drop"
+
+    return "ambiguous"
+
+
+def apply_type_and_name_filter(
+    competitors: dict[str, list[dict]],
+    opportunities: dict[str, list[dict]],
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    def filter_dict(source: dict[str, list[dict]]) -> dict[str, list[dict]]:
+        result: dict[str, list[dict]] = {}
+        for category, items in source.items():
+            kept = [item for item in items if resolve_category(item, category) != "drop"]
+            result[category] = kept
+        return result
+
+    return filter_dict(competitors), filter_dict(opportunities)
+
+
+PLACE_FIELD_MASK = "places.id,places.displayName,places.formattedAddress,places.location,places.types"
+
+
 # Pydantic schemas for the search plan
-# ---------------------------------------------------------------------------
 
 class SearchPlanEntry(BaseModel):
     label: str
@@ -67,7 +196,7 @@ async def geocode_business(client: httpx.AsyncClient, name: str) -> dict:
         f"{BASE_URL}:searchText",
         headers={
             "X-Goog-Api-Key": API_KEY,
-            "X-Goog-FieldMask": PLACE_FIELD_MASK + ",places.types",
+            "X-Goog-FieldMask": PLACE_FIELD_MASK,
         },
         json={"textQuery": name},
     )
@@ -103,7 +232,7 @@ async def nearby_search(client: httpx.AsyncClient, lat: float, lng: float, inclu
         },
         json={
             "includedTypes": [included_type],
-            "maxResultCount": 10,
+            "maxResultCount": 20,
             "locationRestriction": {
                 "circle": {"center": {"latitude": lat, "longitude": lng}, "radius": radius}
             },
@@ -139,7 +268,9 @@ async def text_search_nearby(client: httpx.AsyncClient, query: str, lat: float, 
 
 
 # ---------------------------------------------------------------------------
-# Claude call — generates the dynamic search plan
+# Claude call — generates the dynamic search plan (currently unused, kept
+# for future use if the hardcoded plan is dropped in favor of AI planning
+# again)
 # ---------------------------------------------------------------------------
 
 
@@ -319,26 +450,6 @@ def _merge_details(labels: list[str]) -> list[str]:
     return list(dict.fromkeys(d for d in details if d))
 
 
-# ---------------------------------------------------------------------------
-# NEW: collapse plan entries that resolve to an identical Google Places
-# search, so the same real-world venue type never gets shown twice under
-# two separately-labelled dropdowns.
-# ---------------------------------------------------------------------------
-#
-# Claude sometimes assigns two different source_products (e.g. "Skateboards"
-# and "Scooters") to what is, in Google's eyes, the exact same search
-# (method="nearby_type", value="skateboard_park"). Since each entry's label
-# gets a different bracketed suffix per source_product (e.g. "Skateparks
-# (Skateboards)" vs "Skateparks (Scooters)"), the two entries end up as
-# different dict keys downstream and both get shown — as an identical
-# duplicate dropdown, since the underlying search and results are the same.
-# This merges any entries with the same (category, method, value) into one,
-# combining their bracketed product lists rather than silently dropping one.
-# NOTE: this only catches EXACT search duplicates. For entries that use
-# genuinely different search methods/values but still return mostly the
-# same real-world places (e.g. "Skateparks" vs "Scooter Parks" — see
-# merge_overlapping_result_entries below), this alone isn't enough.
-
 def merge_duplicate_entries(entries: list[SearchPlanEntry]) -> list[SearchPlanEntry]:
     merged: dict[tuple[str, str, str], SearchPlanEntry] = {}
     order: list[tuple[str, str, str]] = []
@@ -392,12 +503,8 @@ def get_search_plan(business_name: str, google_types: list[str], product_list: l
         if entry.source_product.strip().lower() in relevant_lower
     ]
 
-    # Merge entries that resolve to an identical Google Places search
-    # (same category/method/value) so they never show up as a duplicate
-    # dropdown with identical results under two different labels.
     plan.entries = merge_duplicate_entries(plan.entries)
 
-    # TEMP DEBUG — remove once you're done inspecting
     print(f"[classification] {plan.business_classification!r}")
     print(f"[relevant_products] {plan.relevant_products!r}")
     for entry in plan.entries:
@@ -405,21 +512,6 @@ def get_search_plan(business_name: str, google_types: list[str], product_list: l
 
     return plan
 
-
-# ---------------------------------------------------------------------------
-# NEW: merge entries whose RESULTS overlap heavily, even if their search
-# method/value were different.
-# ---------------------------------------------------------------------------
-#
-# This catches cases like "Skateparks" (nearby_type=skateboard_park) and
-# "Scooter Parks" (a separate text_search) which are different searches on
-# paper, but in practice return mostly the same physical parks — because a
-# skatepark and a "scooter park" are usually the same real-world venue.
-# Rather than trying to predict this from the search plan alone (which
-# hasn't reliably worked, even with explicit prompt instructions telling
-# Claude not to split these), this runs AFTER the actual Google results are
-# in and merges any two same-category entries whose result sets overlap by
-# at least `overlap_threshold` of the smaller entry's item count.
 
 def merge_overlapping_result_entries(
     entries: dict[str, list[dict]],
@@ -466,10 +558,6 @@ def merge_overlapping_result_entries(
             new_entries[labels[idx]] = entries[labels[idx]]
             continue
 
-        # Pick the label of whichever entry in the group has the most
-        # items as the "winning" title — usually the broader/more
-        # complete search — and fold every other label's bracketed
-        # detail into it rather than discarding it.
         group_sorted = sorted(group, key=lambda i: len(entries[labels[i]]), reverse=True)
         winner_idx = group_sorted[0]
         winner_title, _ = _split_label(labels[winner_idx])
@@ -494,96 +582,84 @@ def merge_overlapping_result_entries(
 
 
 # ---------------------------------------------------------------------------
-# NEW: Claude call — post-search relevance filter + cross-entry dedup
+# Claude call — global category re-assignment
 # ---------------------------------------------------------------------------
 #
-# This runs AFTER all Google Places results have been gathered. It sees
-# every entry's results side-by-side, so it can:
-#   1. Drop items that are obviously irrelevant to their entry's label
-#      (e.g. a firearms store under "Sports Stores").
-#   2. Catch the same business appearing under multiple entries (e.g. a
-#      bike shop showing up under both "Bike Shops" AND "Sports Stores")
-#      and keep it in ONLY the single most specific entry.
+# This works on the UNIQUE set of places found across every category
+# combined. Each unique place is shown once (with which categories it
+# originally matched, for context). Crucially, Claude is only asked to
+# report EXCEPTIONS — removals, and items whose category needs to change —
+# rather than an explicit assignment for every single item. Any item Claude
+# doesn't mention keeps its original (single) category untouched.
 #
-# We deliberately send indices, not full place_ids, in the prompt — it's
-# far cheaper token-wise, and we map the indices back to the real result
-# dicts in Python afterwards, so nothing relies on Claude echoing IDs back
-# correctly.
+# Why: the old version made Claude output one assignment object per item.
+# For a generalist business with a dozen+ search categories that's easily
+# 100+ items, which blew past max_tokens and got the response truncated
+# mid-JSON — silently producing an empty assignments list and wiping every
+# result. Only asking for exceptions keeps the output small (most items are
+# fine where they are) and is far less likely to ever hit the token limit.
+# An explicit stop_reason check is also a safety net if it ever does.
 
-FILTER_TOOL = {
-    "name": "filter_search_results",
-    "description": "Decide which results to keep in each entry, removing irrelevant results and cross-entry duplicates.",
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "entries": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "entry_index": {
-                            "type": "integer",
-                            "description": "The 0-based index of the entry, matching the ENTRY numbering given in the prompt."
-                        },
-                        "keep_item_indices": {
-                            "type": "array",
-                            "items": {"type": "integer"},
-                            "description": "0-based indices of items (local to this entry's own [n] numbering) to KEEP. Omit an index if that item should be removed — either because it's irrelevant to this entry, or because it's a duplicate being kept in a different, better-fitting entry instead."
-                        }
-                    },
-                    "required": ["entry_index", "keep_item_indices"],
+def build_reassignment_tool(valid_categories: list[str]) -> dict:
+    return {
+        "name": "assign_categories",
+        "description": (
+            "Report only the exceptions. 'removals' = items irrelevant to every "
+            "category. 'moves' = items whose single best category must be set "
+            "explicitly — this is REQUIRED for every [MULTI] item (found under "
+            "more than one category) and OPTIONAL for single-category items (only "
+            "include if it should move out of the category it was found under). "
+            "Any item you don't mention in either list is left exactly where it "
+            "was found."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "removals": {
+                    "type": "array",
+                    "items": {"type": "integer"},
+                    "description": "Indices of items irrelevant to every category — drop entirely.",
                 },
-                "description": "Must include exactly one object per entry index, covering every entry from 0 to the last one shown in the prompt, even if keep_item_indices is empty."
-            }
+                "moves": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "item_index": {"type": "integer"},
+                            "category": {"type": "string", "enum": valid_categories},
+                        },
+                        "required": ["item_index", "category"],
+                    },
+                    "description": "The single best category for an item. Required for every [MULTI] item.",
+                },
+            },
+            "required": ["removals", "moves"],
         },
-        "required": ["entries"],
-    },
-}
+    }
 
 
-def build_filter_prompt(business_name: str, indexed_entries: list[dict]) -> str:
+def build_reassignment_prompt(business_name: str, valid_categories: list[str], items: list[dict]) -> str:
     lines = [
-        f'You are reviewing a set of nearby business search results gathered for '
-        f'"{business_name}", a real business we represent for B2B sales purposes.',
-        'Below is a numbered list of ENTRIES (search categories). Each entry contains '
-        'a numbered list of ITEMS (real businesses found nearby under that search).',
+        f'Clean up local place search results for "{business_name}".',
+        'Categories: ' + ', '.join(valid_categories),
         '',
+        'Places found (each listed once):',
     ]
-
-    for idx, entry in enumerate(indexed_entries):
-        lines.append(f'ENTRY {idx} — "{entry["label"]}" ({entry["category"]}):')
-        if not entry["items"]:
-            lines.append('  (no items)')
-        for item_idx, item in enumerate(entry["items"]):
-            lines.append(f'  [{item_idx}] {item["name"]}')
-        lines.append('')
-
-    lines.append("""Your job has two parts:
-
-1. RELEVANCE FILTERING: For each entry, review its items and decide which ones
-are genuinely relevant to that entry's label and category, given the business
-we represent. Remove items that are obviously, clearly unrelated to the entry
-— for example a firearms store or a lawn bowls pro shop showing up under a
-general "Sports Stores" entry, or a swimming pool supplier showing up under a
-"Skate Shops" entry. If you are UNSURE whether an item is relevant — for
-example a surf shop showing up under "Skate Shops", where surf shops commonly
-also sell skateboards — always err on the side of KEEPING the item rather
-than removing it. Only remove items that are clearly, obviously unrelated.
-
-2. CROSS-ENTRY DEDUPLICATION: The same real business may appear as an item in
-more than one entry (e.g. a bike shop that also gets picked up by a more
-general search like "Sports Stores"). If the same business name appears in
-more than one entry, it should only be kept in the SINGLE entry that best and
-most specifically matches what that business actually is (e.g. keep a
-dedicated bike shop under "Bike Shops", not also under a more generic "Sports
-Stores" entry). Remove it from every other, less specific entry it appears in.
-
-Return, for EVERY entry index from 0 to the last one shown above, the list of
-item indices (using the local [n] numbering shown for that entry) that should
-be KEPT. Omit an item's index if it should be removed for either reason
-above. It is fine for an entry's keep_item_indices to be an empty list if
-every item in it should be removed.""")
-
+    for idx, item in enumerate(items):
+        found = ', '.join(item["found_in"])
+        marker = ' [MULTI]' if len(item["found_in"]) > 1 else ''
+        lines.append(f'[{idx}] {item["name"]} — found under: {found}{marker}')
+    lines.append('')
+    lines.append(
+        "Rules:\n"
+        "- Totally irrelevant to every category (e.g. a firearms store) -> add its index to removals.\n"
+        "- Every [MULTI] item MUST appear in moves with the single category it fits best "
+        "(dropped from the rest automatically).\n"
+        "- A single-category item only needs to appear in moves if it's a clearly better fit "
+        "elsewhere (e.g. a surf shop found under 'Skate Shop' should move to 'Surf Shop').\n"
+        "- If genuinely torn between two categories, default to 'Sports Store'.\n"
+        "- Don't mention items that are fine staying exactly where they are."
+    )
     return "\n".join(lines)
 
 
@@ -592,74 +668,190 @@ def apply_relevance_filter(
     opportunities: dict[str, list[dict]],
     competitors: dict[str, list[dict]],
 ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
-    # Build one flat, ordered list of entries so we can map Claude's
-    # indices back to the right dict + label afterwards.
-    indexed_entries = []
-    for label, items in competitors.items():
-        indexed_entries.append({"origin": "competitor", "label": label, "category": "competitor", "items": items})
-    for label, items in opportunities.items():
-        indexed_entries.append({"origin": "opportunity", "label": label, "category": "opportunity", "items": items})
+    label_side: dict[str, str] = {}
+    for label in competitors:
+        label_side[label] = "competitor"
+    for label in opportunities:
+        label_side[label] = "opportunity"
 
-    # Nothing to filter — skip the extra API call entirely.
-    if not indexed_entries or not any(e["items"] for e in indexed_entries):
+    if not label_side:
         return opportunities, competitors
 
-    prompt = build_filter_prompt(business_name, indexed_entries)
+    # Merge every place into a single de-duplicated list, remembering
+    # which category label(s) it was originally found under.
+    unique_items: dict[str, dict] = {}
+    order: list[str] = []
+
+    def collect(source: dict[str, list[dict]]) -> None:
+        for label, items in source.items():
+            for item in items:
+                key = item.get("place_id") or item["name"].strip().lower()
+                if key not in unique_items:
+                    unique_items[key] = {**item, "found_in": []}
+                    order.append(key)
+                if label not in unique_items[key]["found_in"]:
+                    unique_items[key]["found_in"].append(label)
+
+    collect(competitors)
+    collect(opportunities)
+
+    if not order:
+        return opportunities, competitors
+
+    valid_categories = list(label_side.keys())
+    items_list = [unique_items[k] for k in order]
+    prompt = build_reassignment_prompt(business_name, valid_categories, items_list)
+    tool = build_reassignment_tool(valid_categories)
 
     try:
         message = claude_client.messages.create(
             model=CLAUDE_MODEL,
-            max_tokens=2048,
-            tools=[FILTER_TOOL],
-            tool_choice={"type": "tool", "name": "filter_search_results"},
+            max_tokens=4096,
+            tools=[tool],
+            tool_choice={"type": "tool", "name": "assign_categories"},
             messages=[{"role": "user", "content": prompt}],
         )
+
+        if message.stop_reason == "max_tokens":
+            # Response got cut off mid-JSON — do NOT trust whatever partial
+            # input came through, it will under-report and wipe results.
+            raise ValueError("relevance filter response was truncated (max_tokens)")
+
         tool_use_block = next((b for b in message.content if b.type == "tool_use"), None)
         if tool_use_block is None:
             raise ValueError("Claude did not return a tool_use block")
-        result_entries = tool_use_block.input.get("entries", [])
+
+        removals = {int(i) for i in tool_use_block.input.get("removals", [])}
+
+        moves: dict[int, str] = {}
+        for m in tool_use_block.input.get("moves", []):
+            try:
+                moves[int(m["item_index"])] = m["category"]
+            except (KeyError, TypeError, ValueError):
+                continue
     except Exception as e:
-        # Fail-open: if this call breaks for any reason (network error,
-        # bad response, rate limit, etc.), return the ORIGINAL unfiltered
-        # results rather than losing the whole scan over a filtering step.
+        # Fail-open: on any failure, keep everything exactly as it was
+        # rather than losing the whole scan over a filtering step.
         print(f"[relevance filter] failed, skipping filter: {e!r}")
         return opportunities, competitors
 
-    keep_map: dict[int, set[int]] = {}
-    for r in result_entries:
-        try:
-            entry_index = int(r["entry_index"])
-            keep_indices = {int(i) for i in r.get("keep_item_indices", [])}
-            keep_map[entry_index] = keep_indices
-        except (KeyError, TypeError, ValueError):
+    new_competitors: dict[str, list[dict]] = {label: [] for label in competitors}
+    new_opportunities: dict[str, list[dict]] = {label: [] for label in opportunities}
+
+    for idx, key in enumerate(order):
+        if idx in removals:
             continue
 
-    new_opportunities: dict[str, list[dict]] = {}
-    new_competitors: dict[str, list[dict]] = {}
+        item = unique_items[key]
+        clean_item = {k: v for k, v in item.items() if k != "found_in"}
+        found_in = item["found_in"]
 
-    for idx, entry in enumerate(indexed_entries):
-        keep_indices = keep_map.get(idx)
-        if keep_indices is None:
-            # This entry was missing from Claude's response — fail-open
-            # and keep everything for it, rather than silently dropping
-            # an entire entry's results due to an incomplete response.
-            filtered_items = entry["items"]
+        if idx in moves:
+            category = moves[idx]
+            if category not in label_side:
+                continue
+        elif len(found_in) > 1:
+            # A [MULTI] item Claude didn't resolve as instructed — fail-safe
+            # default per the original spec, rather than dropping or
+            # duplicating it across every category it was found under.
+            category = "Sports Store" if "Sports Store" in label_side else found_in[0]
         else:
-            filtered_items = [
-                item for item_idx, item in enumerate(entry["items"])
-                if item_idx in keep_indices
-            ]
+            category = found_in[0]
 
-        removed_count = len(entry["items"]) - len(filtered_items)
-        if removed_count:
-            print(f"[relevance filter] {entry['label']!r}: removed {removed_count} item(s)")
-
-        if entry["origin"] == "competitor":
-            new_competitors[entry["label"]] = filtered_items
+        if label_side[category] == "competitor":
+            new_competitors[category].append(clean_item)
         else:
-            new_opportunities[entry["label"]] = filtered_items
+            new_opportunities[category].append(clean_item)
+
+    for label in new_competitors:
+        new_competitors[label].sort(key=lambda r: r["distance_km"])
+    for label in new_opportunities:
+        new_opportunities[label].sort(key=lambda r: r["distance_km"])
 
     return new_opportunities, new_competitors
+
+
+# ---------------------------------------------------------------------------
+# Deterministic post-filter — name-keyword category override
+# ---------------------------------------------------------------------------
+#
+# The AI relevance filter is good but not infallible. Two concrete cases
+# this covers, purely on name-substring matching, no AI judgement call:
+#
+# 1. An entry like "99 Bikes Ryde" sitting in "Sports Store" instead of
+#    "Bike Shop" — competitor/shop side.
+# 2. An entry like "Jim Lawrie Oval" getting swallowed into "Rugby Club"
+#    instead of "Oval" because it also matched that search — opportunity
+#    side. Since "oval" doesn't collide with any other opportunity
+#    category's naming pattern, a straight substring swap is reliable here.
+#
+# Competitor-side and opportunity-side keyword lists are applied
+# independently (never cross the two), because unlike "oval", keywords
+# like "bike" or "skate" DO show up constantly in venue names too (e.g.
+# "Boronia Bike Track", "Parramatta Skate Park") — mixing sides would wrongly
+# reclassify skateparks as skate shops. See the bike/skate/surf/sport list
+# below, which stays competitor-only for that reason.
+
+NAME_KEYWORD_CATEGORY_TARGETS: list[tuple[tuple[str, ...], str]] = [
+    (("bike", "bicycle"), "Bike Shop"),
+    (("skate",), "Skate Shop"),
+    (("surf",), "Surf Shop"),
+    (("sport",), "Sports Store"),
+]
+
+NAME_KEYWORD_CATEGORY_TARGETS_OPPORTUNITIES: list[tuple[tuple[str, ...], str]] = [
+    (("oval",), "Oval"),
+]
+
+
+def _apply_keyword_targets(
+    source: dict[str, list[dict]],
+    keyword_targets: list[tuple[tuple[str, ...], str]],
+) -> dict[str, list[dict]]:
+    valid_labels = set(source.keys())
+    targets = [(kws, cat) for kws, cat in keyword_targets if cat in valid_labels]
+
+    new_source: dict[str, list[dict]] = {label: [] for label in source}
+    seen_per_category: dict[str, set[str]] = {label: set() for label in source}
+
+    for label, items in source.items():
+        for item in items:
+            name_lower = item["name"].strip().lower()
+            key = item.get("place_id") or name_lower
+
+            forced_category = None
+            for keywords, cat in targets:
+                if any(kw in name_lower for kw in keywords):
+                    forced_category = cat
+                    break
+
+            destination = forced_category if forced_category else label
+
+            if key in seen_per_category[destination]:
+                continue
+            seen_per_category[destination].add(key)
+            new_source[destination].append(item)
+
+    for label in new_source:
+        new_source[label].sort(key=lambda r: r["distance_km"])
+
+    return new_source
+
+
+def apply_name_keyword_override(
+    opportunities: dict[str, list[dict]],
+    competitors: dict[str, list[dict]],
+) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    new_competitors = _apply_keyword_targets(competitors, NAME_KEYWORD_CATEGORY_TARGETS)
+    new_opportunities = _apply_keyword_targets(opportunities, NAME_KEYWORD_CATEGORY_TARGETS_OPPORTUNITIES)
+    return new_opportunities, new_competitors
+
+def prioritize_skateparks(opportunities: dict[str, list[dict]]) -> dict[str, list[dict]]:
+    """Force 'Skatepark' to the front of the opportunities dict if present.
+    Leaves everything else in whatever order it was already in."""
+    if "Skatepark" not in opportunities:
+        return opportunities
+    return {"Skatepark": opportunities["Skatepark"], **{k: v for k, v in opportunities.items() if k != "Skatepark"}}
 
 
 # ---------------------------------------------------------------------------
@@ -684,75 +876,168 @@ async def scan_location(
         anchor = await geocode_business(client, business_name)
         lat = anchor["location"]["latitude"]
         lng = anchor["location"]["longitude"]
-        google_types = anchor.get("types", [])
         anchor_id = anchor.get("id")
 
-        plan = get_search_plan(business_name, google_types, product_list)
+        product_stock = set()
 
-        opportunities: dict[str, list[dict]] = {}
+        lowBusinessName = anchor["displayName"]["text"].lower()
+
+        #add searched business name first  to get maps full same, e.g. someone searched "slam factory" but the google result gives full name "slam factory indoor skatepark", skate keyword needed for below
+        if any(w in lowBusinessName for w in ("bike", "bicycle")):
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Scooters")
+
+        if "skate" in lowBusinessName:
+            product_stock.add("Skateboards")
+            product_stock.add("Scooters")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+
+        if "scooter" in lowBusinessName:
+            product_stock.add("Skateboards")
+            product_stock.add("Scooters")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+
+        if "surf" in lowBusinessName:
+            product_stock.add("Skateboards")
+            product_stock.add("Scooters")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+
+        if "snow" in lowBusinessName:
+            product_stock.add("Skateboards")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+
+        if (any(w in lowBusinessName for w in ("sport", "fitness", "rebel", "anaconda"))) and not (any(w in lowBusinessName for w in ("bike", "bicycle", "skate", "scooter", "surf", "snow"))):
+            product_stock.add("Skateboards")
+            product_stock.add("Scooters")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+            product_stock.add("Mouthguards")
+
+        if not any(w in lowBusinessName for w in ("bike", "bicycle", "skate", "scooter", "surf", "snow", "sport", "fitness", "rebel", "anaconda")):
+            product_stock.add("Skateboards")
+            product_stock.add("Scooters")
+            product_stock.add("Knee_ElbowPads")
+            product_stock.add("Skate_Scooter_Bike_Helmets")
+            product_stock.add("Mouthguards")
+
         competitors: dict[str, list[dict]] = {}
+        opportunities: dict[str, list[dict]] = {}
 
-        for entry in plan.entries:
-            radius = COMPETITOR_RADIUS_METERS if entry.category == "competitor" else OPPORTUNITY_RADIUS_METERS
+        for product in product_stock:
+            competitorsCategories = HARDCODED_SEARCHES[product]["Competitors"]
+            opportunityCategories = HARDCODED_SEARCHES[product]["Opportunities"]
 
-            if entry.method == "nearby_type":
-                try:
-                    raw_places = await nearby_search(client, lat, lng, entry.value, radius)
-                except UnsupportedTypeError:
-                    fallback_query = entry.value.replace("_", " ")
-                    raw_places = await text_search_nearby(client, fallback_query, lat, lng, radius)
-            else:
-                raw_places = await text_search_nearby(client, entry.value, lat, lng, radius)
+            for competitorCategory in competitorsCategories:
+                method, searchTerm = SEARCH_TERM_LOOKUP[competitorCategory]
 
-            radius_km = radius / 1000
+                if method == "nearby_type":
+                    try:
+                        raw_competitors = await nearby_search(client, lat, lng, searchTerm, COMPETITOR_RADIUS_METERS)
+                    except UnsupportedTypeError:
+                        fallback_query = searchTerm.replace("_", " ")
+                        raw_competitors = await text_search_nearby(client, fallback_query, lat, lng, COMPETITOR_RADIUS_METERS)
+                else:
+                    raw_competitors = await text_search_nearby(client, searchTerm, lat, lng, COMPETITOR_RADIUS_METERS)
 
-            results_with_distance = []
-            seen_names = set()
-            for p in raw_places:
-                if p.get("id") == anchor_id:
-                    continue
+                competitor_radius_km = COMPETITOR_RADIUS_METERS / 1000
+                category_results = []
+                for comp in raw_competitors:
+                    if comp.get("id") == anchor_id:
+                        continue
+                    comp_lat = comp["location"]["latitude"]
+                    comp_lng = comp["location"]["longitude"]
+                    distance_km = round(haversine_km(lat, lng, comp_lat, comp_lng), 1)
+                    if distance_km > competitor_radius_km:
+                        continue
+                    category_results.append({
+                        "name": comp["displayName"]["text"],
+                        "distance_km": distance_km,
+                        "place_id": comp.get("id", ""),
+                        "types": comp.get("types", []),
+                    })
 
-                p_lat = p["location"]["latitude"]
-                p_lng = p["location"]["longitude"]
-                distance_km = round(haversine_km(lat, lng, p_lat, p_lng), 1)
+                category_results.sort(key=lambda r: r["distance_km"])
 
-                if distance_km > radius_km:
-                    continue
+                seen = set()
+                deduped = []
+                for r in category_results:
+                    key = r["name"].strip().lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(r)
 
-                name = p["displayName"]["text"]
-                place_id = p.get("id", "")
-                results_with_distance.append({
-                    "name": name,
-                    "distance_km": distance_km,
-                    "place_id": place_id,
-                })
+                if competitorCategory in competitors:
+                    existing_keys = {r["name"].strip().lower() for r in competitors[competitorCategory]}
+                    competitors[competitorCategory].extend(r for r in deduped if r["name"].strip().lower() not in existing_keys)
+                else:
+                    competitors[competitorCategory] = deduped
 
-            results_with_distance.sort(key=lambda r: r["distance_km"])
+            for opportunityCategory in opportunityCategories:
+                method, searchTerm = SEARCH_TERM_LOOKUP[opportunityCategory]
 
-            deduped_results = []
-            for r in results_with_distance:
-                key = r["name"].strip().lower()
-                if key in seen_names:
-                    continue
-                seen_names.add(key)
-                deduped_results.append(r)
+                if method == "nearby_type":
+                    try:
+                        raw_opportunities = await nearby_search(client, lat, lng, searchTerm, OPPORTUNITY_RADIUS_METERS)
+                    except UnsupportedTypeError:
+                        fallback_query = searchTerm.replace("_", " ")
+                        raw_opportunities = await text_search_nearby(client, fallback_query, lat, lng, OPPORTUNITY_RADIUS_METERS)
+                else:
+                    raw_opportunities = await text_search_nearby(client, searchTerm, lat, lng, OPPORTUNITY_RADIUS_METERS)
 
-            if entry.category == "opportunity":
-                opportunities[entry.label] = deduped_results
-            else:
-                competitors[entry.label] = deduped_results
+                opportunity_radius_km = OPPORTUNITY_RADIUS_METERS / 1000
+                category_results = []
+                for opp in raw_opportunities:
+                    if opp.get("id") == anchor_id:
+                        continue
+                    opp_lat = opp["location"]["latitude"]
+                    opp_lng = opp["location"]["longitude"]
+                    distance_km = round(haversine_km(lat, lng, opp_lat, opp_lng), 1)
+                    if distance_km > opportunity_radius_km:
+                        continue
+                    category_results.append({
+                        "name": opp["displayName"]["text"],
+                        "distance_km": distance_km,
+                        "place_id": opp.get("id", ""),
+                        "types": opp.get("types", []),
+                    })
 
-        # NEW: merge entries whose actual results overlap heavily, even if
-        # their search method/value on paper were different (e.g.
-        # "Skateparks" and "Scooter Parks" usually returning the same
-        # physical parks). This runs before the relevance filter so we
-        # don't waste a filter pass on entries we're about to merge anyway.
-        opportunities = merge_overlapping_result_entries(opportunities)
-        competitors = merge_overlapping_result_entries(competitors)
+                category_results.sort(key=lambda r: r["distance_km"])
 
-        # Relevance + cross-entry dedup pass, using everything we've
-        # gathered so far across all entries.
+                seen = set()
+                deduped = []
+                for r in category_results:
+                    key = r["name"].strip().lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    deduped.append(r)
+
+                if opportunityCategory in opportunities:
+                    existing_keys = {r["name"].strip().lower() for r in opportunities[opportunityCategory]}
+                    opportunities[opportunityCategory].extend(r for r in deduped if r["name"].strip().lower() not in existing_keys)
+                else:
+                    opportunities[opportunityCategory] = deduped
+
+        # Deterministic type/name filter — disabled, was too aggressive.
+        # competitors, opportunities = apply_type_and_name_filter(competitors, opportunities)
+
+        # Claude-based global category re-assignment — can move a place
+        # between categories, remove it entirely, or leave it as-is.
         opportunities, competitors = apply_relevance_filter(business_name, opportunities, competitors)
+
+        # Deterministic safety net: force entries whose name contains a
+        # bike/skate/surf/sport keyword into the matching category,
+        # overriding whatever the AI filter decided.
+        opportunities, competitors = apply_name_keyword_override(opportunities, competitors)
+
+        # Always surface Skateparks first in the opportunities list, when present.
+        opportunities = prioritize_skateparks(opportunities)
 
     return {
         "anchor": {
