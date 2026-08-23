@@ -2,12 +2,77 @@
 
 import { useState } from 'react';
 
+<<<<<<< Updated upstream
 // Defines the shape of a search result so TypeScript knows what "data" looks like
 interface SearchResult {
   companyName: string;
   location: string;
   description: string;
   competitors: string[];
+=======
+interface PlaceResult {
+  name: string;
+  distance_km: number;
+  place_id: string;
+}
+
+interface ScanResult {
+  anchor: {
+    name: string;
+    address: string | null;
+  };
+  products_received: string[];
+  opportunities: Record<string, PlaceResult[]>;
+  competitors: Record<string, PlaceResult[]>;
+  webScanTest: string;
+
+  
+}
+
+const PRODUCT_CATEGORIES = [
+  'Mouthguards',
+  'Skateboards',
+  'Scooters',
+  'Knee & Elbow Pads',
+  'Skate/Scooter/Bike Helmets',
+];
+
+const PRODUCT_DISPLAY_NAMES: Record<string, string> = {
+  'Skate/Scooter/Bike Helmets': 'Helmets',
+}
+
+const pillStyle: React.CSSProperties = {
+  width: '100%',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'flex-start',
+  backgroundColor: '#111111',
+  color: '#ffffff',
+  border: 'none',
+  borderRadius: '999px',
+  padding: '14px 20px',
+  fontSize: '14px',
+  fontWeight: 700,
+  cursor: 'pointer',
+  textAlign: 'left',
+  position: 'relative',
+};
+
+function buildMapsUrl(place: PlaceResult): string {
+  const query = encodeURIComponent(place.name);
+  if (!place.place_id) {
+    return `https://www.google.com/maps/search/?api=1&query=${query}`;
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${query}&query_place_id=${place.place_id}`;
+}
+
+function parseLabel(label: string): { title: string; detail: string | null } {
+  const match = label.match(/^(.+?)\s*\(([\s\S]*)\)\s*$/);
+  if (match) {
+    return { title: match[1].trim(), detail: match[2].trim() };
+  }
+  return { title: label.trim(), detail: null };
+>>>>>>> Stashed changes
 }
 
 export default function SearchPage() {
@@ -88,6 +153,7 @@ export default function SearchPage() {
         )}
       </div>
 
+<<<<<<< Updated upstream
       <style jsx>{`
         /* Page wrapper — transparent, full height, centers content horizontally */
         .page {
@@ -99,6 +165,49 @@ export default function SearchPage() {
           display: flex;
           justify-content: center;
         }
+=======
+
+
+
+     {/* website analysis feature insert */}
+      {data && (
+        <div
+          style={{
+            width: '100%',
+            maxWidth: '600px',
+            margin: '24px auto',
+            backgroundColor: '#111111',
+            color: '#ffffff',
+            borderRadius: '14px',
+            padding: '24px',
+            boxSizing: 'border-box',
+          }}
+        >
+          <h2 style={{ margin: 0, fontSize: '16px', fontWeight: 700 }}>
+            Website Analysis
+          </h2>
+          <p style={{ margin: '8px 0 0', fontSize: '13px', color: '#a3a3a3' }}>
+            {data.webScanTest}
+          </p>
+        </div>
+      )}
+
+
+
+      {data && (
+        <div className={styles.resultsLayout}>
+          <div className={styles.competitorsColumn}>
+              <h2 className={styles.columnHeading} style={{ marginLeft: '100px'}}>Local Competitors</h2>
+            <div className={styles.dropdownList}>
+              {Object.entries(data.competitors).map(([label, items]) =>
+                renderDropdown(`competitor:${label}`, label, items)
+              )}
+              {Object.keys(data.competitors).length === 0 && (
+                <p className={styles.emptyNote}>None found nearby.</p>
+              )}
+            </div>
+          </div>
+>>>>>>> Stashed changes
 
         /* Single centered column holding search bar + results */
         .content {
